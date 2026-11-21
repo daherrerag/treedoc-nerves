@@ -2,6 +2,7 @@ defmodule Crdt.Boot do
   use GenServer
   require Logger
 
+  @name "doc"
   @iface "wlan0"
   @cookie :cpd2026
   @data_dir "/data/crdt"
@@ -35,7 +36,7 @@ defmodule Crdt.Boot do
   end
 
   defp start_everything(ip, state) do
-    node = :"#{hostname()}@#{:inet.ntoa(ip)}"
+    node = :"#{@name}@#{:inet.ntoa(ip)}"
 
     case ensure_distribution(node) do
       :ok ->
@@ -90,14 +91,14 @@ defmodule Crdt.Boot do
   end
 
   # de start.sh
-  defp hostname do
-    {:ok, host} = :inet.gethostname()
+  #defp hostname do
+  #  {:ok, host} = :inet.gethostname()
 
-    host
-    |> List.to_string()
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9_-]/, "_")
-  end
+  #  host
+  #  |> List.to_string()
+  #  |> String.downcase()
+  #  |> String.replace(~r/[^a-z0-9_-]/, "_")
+  #end
 
   defp ipv4 do
     case VintageNet.get(["interface", @iface, "addresses"]) do
