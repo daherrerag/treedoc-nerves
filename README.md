@@ -24,6 +24,18 @@ Create a biolerplate
 mix nerves.new <proj-name>
 ```
 
+If you use the start.sh from [original repo](https://github.com/fepecas/treedoc)
+you can:
+
+```elixir
+Crdt.insert(index, "text")   # insert each character starting at index
+Crdt.delete(index, count)    # delete count characters (count defaults to 1)
+Crdt.text()                  # visible text
+Crdt.status()                # node, table, discovery, connected nodes, clock, history, buffer
+Crdt.history()               # last 10 applied operations; Crdt.history(:all) for all
+Crdt.debug()                 # each character with its position identifier
+```
+
 ## Without nerves
 
 Look at original repo: https://github.com/fepecas/treedoc/tree/main
