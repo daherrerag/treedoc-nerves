@@ -73,7 +73,10 @@ defmodule Crdt.MixProject do
       overwrite: true,
       # Erlang distribution is not started automatically.
       # See https://nerves-pack.hexdocs.pm/readme.html#erlang-distribution
-      cookie: "#{@app}_cookie",
+      #
+      # Crdt.Boot also calls Node.set_cookie/1 at runtime.
+      # Setting it here means the cookie is correct even before Boot runs.
+      cookie: "cpd2026",
       include_erts: &Nerves.Release.erts/0,
       steps: [&Nerves.Release.init/1, :assemble],
       strip_beams: Mix.env() == :prod or [keep: ["Docs"]]
