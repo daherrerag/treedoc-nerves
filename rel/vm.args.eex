@@ -46,6 +46,14 @@
 ## Enable heartbeat monitoring of the Erlang runtime system
 -heart -env HEART_BEAT_TIMEOUT 30
 
+### No `global` names
+### disable link-cutting on partial partitions.
+-kernel prevent_overlapping_partitions false
+
+## Distribution port range.
+## the router firewall lets peers dial us.
+-kernel inet_dist_listen_min 4218 inet_dist_listen_max 4228
+
 ## Start the Elixir shell
 
 -noshell
