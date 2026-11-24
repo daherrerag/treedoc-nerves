@@ -1,87 +1,96 @@
 defmodule Crdt.Causal do
   @moduledoc """
-  Causal delivery with vector clocks: apply, wait or drop (CLS, DES4, DES4.1, DES4.2).
-  Pure module: no processes, network or files. A missing clock key counts as 0.
+  Causal delivery with vector clocks.
+
+  * duplicate: `m[from] <= vc[from]` (already applied).
+  * deliverable: `m[from] == vc[from] + 1` AND `m[k] <= vc[k]` for every
+    other `k` (every dependency already delivered).
+  * waiting: otherwise (buffer it).
+
+  An op is identified by `{from, m[from]}`.
+  The buffer keeps at most one copy per identity.
   """
 
-  @doc """
-  Candidate `{seq, vc}` for a local operation at `me`, without side effects (REQ4, DES4.1).
-  The caller keeps the new clock only if `Treedoc.prepare/3` returns `{:ok, _}`.
-  """
+  @doc "Next `{seq, vc}` for a local op at `me` (caller keeps vc only on success)."
   def next_local(vc, me) do
-    seq = get(vc, me) + 1
+    seq = Map.get(vc, me, 0) + 1
     {seq, Map.put(vc, me, seq)}
   end
 
-  @doc "True if `msg` was already applied: m[i] <= vc[i] (REQ10, DES4.2)."
-  def duplicate?(vc, msg), do: get(msg.vc, msg.from) <= get(vc, msg.from)
+  @doc "Classify `op` against `vc` as `:duplicate`, `:deliverable` or `:waiting`."
+  def classify(vc, %{from: i, vc: m}) do
+    mi = Map.get(m, i, 0)
+    vi = Map.get(vc, i, 0)
 
-  @doc "True if m[i] == vc[i] + 1 and m[k] <= vc[k] for every other node k (REQ9, DES4.2)."
-  def deliverable?(vc, msg) do
-    get(msg.vc, msg.from) == get(vc, msg.from) + 1 and
-      Enum.all?(msg.vc, fn {k, n} -> k == msg.from or n <= get(vc, k) end)
+    cond do
+      mi <= vi -> :duplicate
+      mi == vi + 1 and deps_ready?(vc, i, m) -> :deliverable
+      true -> :waiting
+    end
   end
+
+  @doc "Update `vc` as if `op` had been delivered: `vc[from] := m[from]`."
+  def deliver(vc, %{from: i, vc: m}), do: Map.put(vc, i, Map.get(m, i, 0))
 
   @doc """
-  REQ9, REQ10: applies, buffers or drops `msg`, then drains the buffer (CLS, DES4.2).
-  `state` is `%{vc: _, buffer: _, doc: _}`; returns `{state, events}` in order.
+  Apply causal delivery to one incoming `op`.
+  Returns
+  `{vc, buffer, applied_ops, result}` where `applied_ops` is the op itself
+  plus anything drained from the buffer that became deliverable, in delivery
+  order, and `result` is `:applied | :duplicate | :waiting`.
   """
-  def receive_message(state, msg, apply_fun) do
-    {state, event} = step(state, msg, apply_fun)
-    {state, events} = drain(state, apply_fun)
-    {state, [event | events]}
-  end
+  def receive(vc, buffer, op) do
+    case classify(vc, op) do
+      :duplicate ->
+        {vc, buffer, [], :duplicate}
 
-  defp step(state, msg, apply_fun) do
-    cond do
-      # REQ10: drop duplicates
-      duplicate?(state.vc, msg) ->
-        {state, {:duplicate, msg}}
+      :waiting ->
+        {vc, buffer_put(buffer, op), [], :waiting}
 
-      deliverable?(state.vc, msg) ->
-        doc = apply_fun.(state.doc, msg)
-        vc = Map.put(state.vc, msg.from, get(msg.vc, msg.from))
-        {%{state | doc: doc, vc: vc}, {:applied, msg}}
-
-      # REQ9: wait for the missing dependencies
-      true ->
-        {buffer_put(state, msg), {:waiting, msg, missing(state.vc, msg)}}
+      :deliverable ->
+        {vc, buffer, applied} = drain(deliver(vc, op), buffer, [op])
+        {vc, buffer, applied, :applied}
     end
   end
 
-  # DES4.2: take out the first buffered message that is ready or duplicate; repeat
-  defp drain(state, apply_fun) do
-    ready = fn msg -> duplicate?(state.vc, msg) or deliverable?(state.vc, msg) end
+  @doc "What `op` is still missing, as `%{node => needed_seq}`."
+  def missing(vc, %{from: i, vc: m}) do
+    Enum.reduce(m, %{}, fn {k, n}, acc ->
+      need = if k == i, do: n - 1, else: n
 
-    case Enum.find(state.buffer, ready) do
+      if need > Map.get(vc, k, 0) do
+        Map.put(acc, k, need)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp deps_ready?(vc, i, m) do
+    Enum.all?(m, fn {k, n} -> k == i or n <= Map.get(vc, k, 0) end)
+  end
+
+  defp buffer_put(buffer, op) do
+    if Enum.any?(buffer, &same_op?(&1, op)) do
+      buffer
+    else
+      buffer ++ [op]
+    end
+  end
+
+  # Drop duplicates from the buffer, then deliver the first deliverable op and
+  # recurse.  Returns `{vc, buffer, applied_in_order}`.
+  defp drain(vc, buffer, applied) do
+    buffer = Enum.reject(buffer, fn op -> classify(vc, op) == :duplicate end)
+
+    case Enum.find(buffer, fn op -> classify(vc, op) == :deliverable end) do
       nil ->
-        {state, []}
+        {vc, buffer, Enum.reverse(applied)}
 
-      msg ->
-        state = %{state | buffer: List.delete(state.buffer, msg)}
-        {state, event} = step(state, msg, apply_fun)
-        {state, events} = drain(state, apply_fun)
-        {state, [event | events]}
+      op ->
+        drain(deliver(vc, op), List.delete(buffer, op), [op | applied])
     end
   end
 
-  # DES4.2: at most one copy per {from, m[from]}
-  defp buffer_put(state, msg) do
-    if Enum.any?(state.buffer, &same_op?(&1, msg)),
-      do: state,
-      else: %{state | buffer: state.buffer ++ [msg]}
-  end
-
-  defp same_op?(a, b), do: a.from == b.from and get(a.vc, a.from) == get(b.vc, b.from)
-
-  @doc "What `msg` still needs, as `%{node => last seq}`; m[i] - 1 for the sender (REQ17, DES4.2)."
-  def missing(vc, msg) do
-    for {k, n} <- msg.vc,
-        need = if(k == msg.from, do: n - 1, else: n),
-        need > get(vc, k),
-        into: %{},
-        do: {k, need}
-  end
-
-  defp get(vc, k), do: Map.get(vc, k, 0)
+  defp same_op?(a, b), do: a.from == b.from and a.vc[a.from] == b.vc[b.from]
 end
