@@ -1,89 +1,287 @@
 defmodule Crdt.Discovery do
   @moduledoc """
-  Finds our nodes on the local network: a UDP multicast announcement every 2 s (REQ14, DES6.1).
-  Only packets with our tag count; without a socket the node keeps the table only (DES6).
+  Peer discovery over the LAN.
+
+  1. **Multicast announcement** — every 2 s, send a UDP packet with the tag
+   `"crdt-treedoc-1 "` and our node name to group `233.252.1.32:45892`.
+   Listen on the same group/port for peers.
+   2. **/24 sweep** — every 10 s, ask each address's epmd which Erlang nodes it
+   runs, and connect to the ones we don't know yet.  Catches peers whose
+   multicast is blocked by the router.
+
+  The multicast values (group, port, tag, interval, immediate first announce)
+  are the wire contract — any node using the same tag and group finds us and
+  vice versa.
+
+  ## Robustness
+
+  * The announced name is validated against a regex before it becomes an atom,
+  so a flood of garbage packets can't fill the atom table.
+  * At most `@max_names` (256) announced names are kept; past that, only
+  already-known names are retried.
+  * A failed `Node.connect` is throttled for `@retry` (30 s) per peer.
+  * Everything from outside is handled without crashing; a packet that fails
+  to parse is dropped silently.
   """
 
   use GenServer
 
-  @tag "crdt-treedoc-1 "
   @group {233, 252, 1, 32}
+  @port 45_892
+  @tag "crdt-treedoc-1 "
+  @announce_every 2_000
 
-  @doc "Options: `:me`, `:ip` and `:port` (docs/DESIGN.md DES8)."
+  @sweep_every 10_000
+  @first_sweep 1_000
+  @retry 30_000
+  @max_names 256
+
+  # A valid announced name: up to 64 chars of [A-Za-z0-9_\-.], then "@", then
+  # an IPv4 in dotted-quad form.
+  @name_regex ~r/\A[A-Za-z0-9_\-.]{1,64}@\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z/
+
+  @doc "Options: `:me`, `:ip`, `:port`."
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @doc "`{mode, heard}`: `\"listening on <port>\"` or `\"announce only\"`, and the node names heard."
+  @doc "`{mode, names}` where mode is the listening state and names are heard peers."
   def info, do: GenServer.call(__MODULE__, :info)
 
-  @doc "The announcement of `node`: our tag and its name."
+  @doc "Build the announcement packet for `node`."
   def packet(node), do: @tag <> Atom.to_string(node)
 
-  @doc "`{:ok, node}` if the packet has our tag (DES6.1), `:ignore` otherwise."
-  def parse(@tag <> name) when name != "", do: {:ok, String.to_atom(name)}
-  def parse(_other), do: :ignore
+  @doc "Parse an incoming packet; returns `{:ok, name}` or `:error`."
+  def parse(@tag <> rest) when rest != "" do
+    if Regex.match?(@name_regex, rest), do: {:ok, String.to_atom(rest)}, else: :error
+  end
+
+  def parse(_), do: :error
 
   @impl true
   def init(opts) do
     me = Keyword.get(opts, :me, node())
-    port = Keyword.get(opts, :port, 45892)
-    ip = Keyword.get_lazy(opts, :ip, fn -> interface(me) end)
+    port = Keyword.get(opts, :port, @port)
+    ip = Keyword.get_lazy(opts, :ip, fn -> own_ip(me) end)
 
-    case open(port, ip) do
-      {:ok, socket, mode} ->
-        send(self(), :announce)
-        {:ok, %{me: me, port: port, socket: socket, mode: mode, heard: MapSet.new()}}
+    :net_kernel.monitor_nodes(true)
+    send(self(), :announce)
+    Process.send_after(self(), :sweep, @first_sweep)
 
-      {:error, reason} ->
-        IO.puts(
-          "[#{me}] discovery off: cannot open UDP port #{port} " <>
-            "(#{:inet.format_error(reason)}). Use a node table (NODES_FILE)."
-        )
-
-        :ignore
-    end
-  end
-
-  # DES6.1: the multicast interface is the IP of the node name, if it is an IPv4
-  defp interface(me) do
-    [_name, host] = String.split(Atom.to_string(me), "@")
-    {result, ip} = :inet.parse_ipv4strict_address(String.to_charlist(host))
-    if result == :ok, do: ip, else: {0, 0, 0, 0}
-  end
-
-  # DES6.1: one listener per machine; if the port is busy, announce only
-  defp open(port, ip) do
-    opts = [:binary, active: true, multicast_if: ip, multicast_ttl: 1, multicast_loop: true]
-
-    with {:error, :eaddrinuse} <- listen(port, ip, opts),
-         {:ok, socket} <- :gen_udp.open(0, opts),
-         do: {:ok, socket, "announce only"}
-  end
-
-  defp listen(port, ip, opts) do
-    with {:ok, socket} <- :gen_udp.open(port, [add_membership: {@group, ip}] ++ opts),
-         do: {:ok, socket, "listening on #{port}"}
+    {:ok, %{me: me, port: port, socket: open_socket(ip), ip: ip,
+            failed: %{}, sweeping: nil, names: MapSet.new()}}
   end
 
   @impl true
-  def handle_call(:info, _from, state), do: {:reply, {state.mode, state.heard}, state}
+  def handle_call(:info, _from, state) do
+    {:reply, {describe_mode(state.socket, state.port), MapSet.to_list(state.names)}, state}
+  end
 
   @impl true
   def handle_info(:announce, state) do
-    # a failed send (Wi-Fi down for a moment) is ignored; the next one tries again
-    :gen_udp.send(state.socket, @group, state.port, packet(state.me))
-    Process.send_after(self(), :announce, 2_000)
+    Process.send_after(self(), :announce, @announce_every)
+
+    # Re-open the socket if our IP changed (e.g. DHCP renewal).
+    state = reopen(state, own_ip(state.me))
+
+    if state.socket != nil do
+      :gen_udp.send(state.socket, @group, state.port, packet(state.me))
+    end
+
     {:noreply, state}
   end
 
-  # DES6.1, DES7.1: ignore our own name and connected nodes; connect in a short-lived process
+  @impl true
   def handle_info({:udp, _socket, _ip, _port, data}, state) do
     case parse(data) do
-      {:ok, n} when n != state.me ->
-        if n not in Node.list(), do: spawn(fn -> Node.connect(n) end)
-        {:noreply, %{state | heard: MapSet.put(state.heard, n)}}
-
-      _ ->
-        {:noreply, state}
+      {:ok, name} -> {:noreply, announced(name, state)}
+      :error -> {:noreply, state}
     end
   end
+
+  @impl true
+  def handle_info(:sweep, state) do
+    Process.send_after(self(), :sweep, @sweep_every)
+    ip = own_ip(state.me)
+
+    # The sweep is opt-in: it can be disabled with `CRDT_SWEEP=off` so a laptop
+    # on someone else's network doesn't probe it.
+    enabled = Application.get_env(:crdt, :sweep, true)
+
+    if ip != nil and state.sweeping == nil and enabled do
+      {:noreply, %{state | sweeping: Task.async(fn -> sweep(ip) end)}}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({ref, _}, %{sweeping: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, %{state | sweeping: nil}}
+  end
+
+  @impl true
+  def handle_info({:nodeup, n}, state) do
+    say(state.me, "connected #{n}")
+    {:noreply, state}
+  end
+
+  def handle_info({:nodedown, n}, state) do
+    say(state.me, "disconnected #{n}")
+    {:noreply, state}
+  end
+
+  # Connect attempt resolved: clear the throttle on success.
+  def handle_info({:attempt, node, true}, state) do
+    {:noreply, %{state | failed: Map.delete(state.failed, node)}}
+  end
+
+  def handle_info(_other, state), do: {:noreply, state}
+
+  defp announced(name, state) do
+    cond do
+      MapSet.member?(state.names, name) ->
+        attempt(name, state)
+
+      MapSet.size(state.names) < @max_names ->
+        attempt(name, %{state | names: MapSet.put(state.names, name)})
+
+      true ->
+        state
+    end
+  end
+
+  defp attempt(node, state) do
+    now = System.monotonic_time(:millisecond)
+
+    if new_peer?(node) and Map.get(state.failed, node, now) <= now do
+      me = self()
+      spawn(fn -> send(me, {:attempt, node, Node.connect(node)}) end)
+      %{state | failed: Map.put(state.failed, node, now + @retry)}
+    else
+      state
+    end
+  end
+
+  defp new_peer?(node), do: node != node() and node not in Node.list()
+
+  # Reopen the socket only if our own IP changed since the last open.
+  defp reopen(%{ip: ip} = state, ip), do: state
+  defp reopen(state, ip) do
+    if state.socket != nil, do: :gen_udp.close(state.socket)
+    %{state | socket: open_socket(ip), ip: ip}
+  end
+
+  defp open_socket(nil), do: nil
+
+  defp open_socket(ip) do
+    opts = [:binary, active: true, reuseaddr: true,
+            multicast_ttl: 1, multicast_loop: true, multicast_if: ip]
+
+    case :gen_udp.open(@port, opts ++ [add_membership: {@group, ip}]) do
+      {:ok, socket} -> socket
+      {:error, _} -> announce_only(opts)
+    end
+  end
+
+  # The port is busy (another listener on this host): open an ephemeral socket
+  # just to send announcements.
+  defp announce_only(opts) do
+    case :gen_udp.open(0, opts) do
+      {:ok, socket} -> socket
+      {:error, _} -> nil
+    end
+  end
+
+  defp describe_mode(nil, _), do: "announce only"
+  defp describe_mode(_socket, port), do: "listening on #{port}"
+
+  defp sweep(ip) do
+    neighbours = neighbours(joined_ip(ip), prefix_of(ip))
+
+    Task.async_stream(neighbours, &connect_at/1,
+      max_concurrency: 64,
+      timeout: 5_000,
+      on_timeout: :kill_task
+    )
+    |> Stream.run()
+  rescue
+    _ -> :error
+  catch
+    _, _ -> :error
+  end
+
+  defp connect_at(ip_str) do
+    for node <- nodes_at(ip_str), new_peer?(node), do: Node.connect(node)
+  end
+
+  defp nodes_at(ip_str) do
+    {:ok, ip} = :inet.parse_ipv4_address(String.to_charlist(ip_str))
+    task = Task.async(fn -> :erl_epmd.names(ip) end)
+
+    case Task.yield(task, 3_000) do
+      {:ok, {:ok, names}} -> valid_names(names, ip_str)
+      nil -> Task.shutdown(task, :brutal_kill); []
+      _ -> []
+    end
+  end
+
+  defp valid_names(names, ip_str) do
+    for {name, _port} <- names, Regex.match?(@name_regex, "#{name}@#{ip_str}") do
+      String.to_atom("#{name}@#{ip_str}")
+    end
+  end
+
+  # Enumerate the host addresses in our subnet (at least a /24), skipping the
+  # network and broadcast addresses.  Returns strings so they can be passed to
+  # :inet.parse_ipv4_address without round-tripping through tuples.
+  defp neighbours(joined, prefix) do
+    [a, b, c, d] = String.split(joined, ".") |> Enum.map(&String.to_integer/1)
+    size = Integer.pow(2, 32 - max(prefix, 24))
+    base = d - rem(d, size)
+
+    if size < 4 do
+      []
+    else
+      for x <- (base + 1)..(base + size - 2), x != d do
+        Enum.join([a, b, c, x], ".")
+      end
+    end
+  end
+
+  defp joined_ip(ip), do: Enum.join(Tuple.to_list(ip), ".")
+
+  defp prefix_of(ip) do
+    case :inet.getifaddrs() do
+      {:ok, ifs} -> bits_in(netmask_of(ifs, ip))
+      {:error, _} -> 24
+    end
+  end
+
+  defp netmask_of(ifs, ip) do
+    Enum.find_value(ifs, fn {_name, opts} ->
+      if {:addr, ip} in opts, do: Keyword.get(opts, :netmask)
+    end)
+  end
+
+  defp bits_in(nil), do: 24
+  defp bits_in(mask), do: Enum.sum(Enum.map(Tuple.to_list(mask), &count_set_bits/1))
+
+  defp count_set_bits(0), do: 0
+  defp count_set_bits(byte), do: rem(byte, 2) + count_set_bits(div(byte, 2))
+
+  # The multicast interface is the IP of our node name, if it is an IPv4.
+  # Loopback (127.0.0.1) returns nil so the socket is opened on 0.0.0.0 instead.
+  defp own_ip(me) do
+    if Node.alive?() do
+      [_, host] = String.split(Atom.to_string(me), "@")
+      to_ipv4(:inet.parse_ipv4_address(String.to_charlist(host)))
+    else
+      nil
+    end
+  end
+
+  defp to_ipv4({:ok, {127, 0, 0, 1}}), do: nil
+  defp to_ipv4({:ok, ip}), do: ip
+  defp to_ipv4({:error, _}), do: nil
+
+  defp say(me, text), do: IO.puts("[#{me}] #{text}")
 end
