@@ -2,9 +2,9 @@ defmodule Crdt.Replica do
   @moduledoc """
   Owner of the node's state.
 
-  Validate incoming term with `Message.validate/1`.
-  Causal delivery, forwarding once per applied op.
-  `ignored` for answering unknown calls.
+  Validates every incoming term with `Message.validate/1`.
+  Causal delivery via `Causal`.  Forwards each applied op once.
+  Unknown calls/casts/info are counted as `ignored`, never crash.
   """
 
   use GenServer
@@ -14,7 +14,6 @@ defmodule Crdt.Replica do
   alias Crdt.Message
   alias Crdt.Treedoc
 
-  # If the buffer ever grows past this, drop the oldest.
   @max_buffer 50_000
 
   @doc """
@@ -25,15 +24,11 @@ defmodule Crdt.Replica do
   * `:name`     — registered name (default `Crdt.Replica`).
   * `:log`      — explicit history file path.
   * `:data_dir` — fallback dir when `:log` is unset (default `data`).
-  * `:me`       — node identity used for the filename (default `node()`).
+  * `:me`       — node identity for the filename (default `node()`).
 
   History path: `:log` opt → `Application.get_env(:crdt, :log)` →
-  `<:data_dir>/<short_name>.log`, where `short_name` is the part of `me`
-  before `@`.
-"""
-def start_link(opts) do
-  GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, Message.name()))
-end
+  `<:data_dir>/<short_name>.log` (`short_name` = `me` before `@`).
+  """
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, Message.name()))
   end
@@ -71,7 +66,7 @@ end
       path: path,
       fd: fd,
       doc: Enum.reduce(ops, Treedoc.new(), &Treedoc.apply_op(&2, &1)),
-      vc: Enum.reduce(ops, %{}, fn op, vc -> Causal.deliver(vc, op) end),
+      vc: rebuild_clock(ops),
       buffer: [],
       history: Enum.reverse(ops),
       n_history: length(ops),
@@ -89,10 +84,22 @@ end
     {:ok, state}
   end
 
-# Corrupted middle line: shelve the file (rename aside, rewrite the valid prefix),
-# and block local edits if we already have a node name
-# reusing it would reissue sequence numbers the cluster has already seen.
-defp recover(me, path, fd, prefix, line) do
+  # Rebuild the vector clock from the persisted history by max-merging every
+  # op's clock.  This is more robust than `Causal.deliver/2` (which only bumps
+  # `vc[from]`) because it picks up dependencies on other nodes even if their
+  # ops are missing from this node's log — e.g. after a shelve that kept only
+  # a prefix.
+  defp rebuild_clock(ops) do
+    Enum.reduce(ops, %{}, fn op, vc ->
+      Enum.reduce(op.vc, vc, fn {k, n}, vc ->
+        Map.put(vc, k, max(Map.get(vc, k, 0), n))
+      end)
+    end)
+  end
+
+  # Corrupted middle line: shelve the file (rename aside, rewrite the valid
+  # prefix), and block local edits if we already have a node name — reusing it
+  # would reissue sequence numbers the cluster has already seen.
   defp recover(me, path, fd, prefix, line) do
     :file.close(fd)
 
@@ -109,22 +116,21 @@ defp recover(me, path, fd, prefix, line) do
     end
   end
 
-
-  # History path: `:log` opt → `Application.get_env(:crdt, :log)` →
-  # # `<:data_dir>/<short_name>.log` (`short_name` = `me` before `@`).
-  defp history_path(opts, me) do  defp history_path(opts, me) do
+  defp history_path(opts, me) do
     cond do
       path = Keyword.get(opts, :log) -> path
       path = Application.get_env(:crdt, :log) -> path
-      true -> # currently no :log set. fallback
+      true ->
         data_dir = Application.get_env(:crdt, :data_dir, Keyword.get(opts, :data_dir, "data"))
         [name | _] = String.split(Atom.to_string(me), "@")
         Path.join(data_dir, name <> ".log")
     end
   end
 
+  # ----------------------------------------------------------- local edits
+
   @impl true
-  def handle_call({:insert, i, text}, _from, %{blocked: true} = state) do
+  def handle_call({:insert, _i, _text}, _from, %{blocked: true} = state) do
     {:reply, {:error, :blocked}, state}
   end
 
@@ -141,7 +147,7 @@ defp recover(me, path, fd, prefix, line) do
   end
 
   @impl true
-  def handle_call({:delete, i, n}, _from, %{blocked: true} = state) do
+  def handle_call({:delete, _i, _n}, _from, %{blocked: true} = state) do
     {:reply, {:error, :blocked}, state}
   end
 
@@ -152,28 +158,14 @@ defp recover(me, path, fd, prefix, line) do
     end
   end
 
+  # --------------------------------------------------------------- queries
+
   @impl true
   def handle_call(:text, _from, state), do: {:reply, Treedoc.text(state.doc), state}
 
   @impl true
   def handle_call(:status, _from, state) do
-    summary = %{
-      node: node(),
-      author: state.me,
-      peers: Node.list(),
-      clock: state.vc,
-      waiting: waiting_summary(state),
-      history: state.n_history,
-      chars: map_size(state.doc.chars),
-      dead: MapSet.size(state.doc.dead),
-      received: state.received,
-      duplicates: state.duplicates,
-      ignored: state.ignored,
-      blocked: state.blocked,
-      file: state.path
-    }
-
-    {:reply, summary, state}
+    {:reply, status_map(state), state}
   end
 
   @impl true
@@ -196,6 +188,8 @@ defp recover(me, path, fd, prefix, line) do
     {:reply, {:error, :unknown}, state}
   end
 
+  # ---------------------------------------------------------- remote ops
+
   @impl true
   def handle_cast({:remote, raw}, state) do
     case Message.validate(raw) do
@@ -215,6 +209,8 @@ defp recover(me, path, fd, prefix, line) do
     {:noreply, %{state | ignored: state.ignored + 1}}
   end
 
+  # ------------------------------------------------------------- network
+
   @impl true
   def handle_info({:nodeup, _n}, state) do
     send_history(state)
@@ -231,6 +227,8 @@ defp recover(me, path, fd, prefix, line) do
   def handle_info(_other, state) do
     {:noreply, %{state | ignored: state.ignored + 1}}
   end
+
+  # ----------------------------------------------------------- insert impl
 
   defp insert_at(i, chars, state) do
     case author(state, chars) do
@@ -255,6 +253,8 @@ defp recover(me, path, fd, prefix, line) do
     [op | ins_ops(rest, seq + 1, me, vc)]
   end
 
+  # ----------------------------------------------------------- delete impl
+
   defp delete(posids, state) do
     case author(state, posids) do
       {:ok, me, state} ->
@@ -272,14 +272,12 @@ defp recover(me, path, fd, prefix, line) do
     [op | del_ops(rest, seq + 1, me, vc)]
   end
 
-  # The node name to attribute edits to.  Use `node()` if distributed (it may
-  # have changed after a `Node.stop`/restart); otherwise reuse the remembered
-  # name, or refuse if we never had one.
-  defp author(state, _) do  defp author(state, []) do
-    {:ok, nil, state}
-  end
+  # The node name to attribute edits to.  Empty edit list needs no author.
+  # Use `node()` if distributed (it may have changed after a `Node.stop`/
+  # restart); otherwise reuse the remembered name, or refuse.
+  defp author(state, []), do: {:ok, nil, state}
 
-  defp author(state, _) do
+  defp author(state, _non_empty) do
     cond do
       Node.alive?() -> {:ok, node(), %{state | me: node()}}
       state.me != nil -> {:ok, state.me, state}
@@ -287,13 +285,15 @@ defp recover(me, path, fd, prefix, line) do
     end
   end
 
+  # ----------------------------------------------- local apply pipeline
+
   # validate → persist → apply → broadcast.
   # Persist before broadcast (durable before peers see it);
   # validate before persist (log reloads cleanly).
-  defp local_ops([], state), do: {:reply, :ok, state}  defp local_ops([], state), do: {:reply, :ok, state}
+  defp local_ops([], state), do: {:reply, :ok, state}
 
   defp local_ops(ops, state) do
-    if Enum.all?(ops, fn op -> Message.validate(op) != :error end) do
+    if Enum.all?(ops, &(Message.validate(&1) != :error)) do
       persist(ops, state)
     else
       {:reply, {:error, :invalid_op}, state}
@@ -303,9 +303,10 @@ defp recover(me, path, fd, prefix, line) do
   defp persist(ops, state) do
     case History.add(state.fd, ops) do
       :ok ->
-        state = Enum.reduce(ops, state, fn op, s ->
-          %{s | doc: Treedoc.apply_op(s.doc, op), vc: Causal.deliver(s.vc, op)}
-        end)
+        state =
+          Enum.reduce(ops, state, fn op, s ->
+            %{s | doc: Treedoc.apply_op(s.doc, op), vc: Causal.deliver(s.vc, op)}
+          end)
 
         Enum.each(ops, &broadcast({:remote, &1}))
         {:reply, :ok, note(state, ops)}
@@ -315,13 +316,18 @@ defp recover(me, path, fd, prefix, line) do
     end
   end
 
+  # --------------------------------------------------------- remote apply
+
   defp remote_op(op, state) do
     {vc, buffer, applied, result} = Causal.receive(state.vc, state.buffer, op)
     state = %{state | vc: vc, buffer: trim(buffer)}
-    state = case result do
-      :duplicate -> %{state | duplicates: state.duplicates + 1}
-      _ -> state
-    end
+
+    state =
+      case result do
+        :duplicate -> %{state | duplicates: state.duplicates + 1}
+        _ -> state
+      end
+
     apply_remote(applied, state)
   end
 
@@ -342,7 +348,7 @@ defp recover(me, path, fd, prefix, line) do
       {:error, reason} -> say(state.me, "cannot write #{state.path}: #{inspect(reason)}")
     end
 
-    doc = Enum.reduce(ops, state.doc, fn op, d -> Treedoc.apply_op(d, op) end)
+    doc = Enum.reduce(ops, state.doc, &Treedoc.apply_op(&2, &1))
 
     Enum.each(ops, &broadcast({:remote, &1}))
 
@@ -351,14 +357,11 @@ defp recover(me, path, fd, prefix, line) do
   end
 
   defp note(state, ops) do
-    %{state |
-      history: Enum.reverse(ops, state.history),
-      n_history: state.n_history + length(ops)}
+    %{state | history: Enum.reverse(ops, state.history), n_history: state.n_history + length(ops)}
   end
 
-  # Resend every op in the history, in order, to every connected peer.
-  # Used on :hello and :nodeup.
-  # Duplicates are dropped by the receiver's causal layer.
+  # ------------------------------------------------------------- helpers
+
   defp send_history(state) do
     Enum.each(Enum.reverse(state.history), &broadcast({:remote, &1}))
   end
@@ -369,6 +372,24 @@ defp recover(me, path, fd, prefix, line) do
 
   defp remember_name(state) do
     if Node.alive?(), do: %{state | me: node()}, else: state
+  end
+
+  defp status_map(state) do
+    %{
+      node: node(),
+      author: state.me,
+      peers: Node.list(),
+      clock: state.vc,
+      waiting: waiting_summary(state),
+      history: state.n_history,
+      chars: map_size(state.doc.chars),
+      dead: MapSet.size(state.doc.dead),
+      received: state.received,
+      duplicates: state.duplicates,
+      ignored: state.ignored,
+      blocked: state.blocked,
+      file: state.path
+    }
   end
 
   defp waiting_summary(state) do
