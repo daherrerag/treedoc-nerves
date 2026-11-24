@@ -129,6 +129,22 @@ Crdt.insert(0, "hi bob")
 Crdt.text()    # "hi bob"
 ```
 
+## Web editor (browser view of a node)
+
+```sh
+iex --name laptop@192.168.1.10 --cookie cpd2026 -S mix
+```
+
+```elixir
+Crdt.Web.start()                      # then open http://localhost:4000
+Node.connect(:"doc@192.168.1.50")     # or Crdt.Web.start(discovery: true)
+```
+
+The page is a thin client: edits are sent as `{index, del, ins}` to the local
+replica; remote edits show up via polling `/state`.  On a Pi, run
+`Crdt.Web.start(ip: {0, 0, 0, 0})` from the SSH IEx to serve it at
+`http://nerves.local:4000`.
+
 ## How peers find each other
 
 1. **Multicast** — every node announces itself every 2 s on UDP group

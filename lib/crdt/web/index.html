@@ -1,0 +1,116 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPD 2026 / Masters of treedoc-op</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 0; display: flex; flex-direction: column; height: 100vh; }
+  header { padding: .5rem 1rem; font-size: .85rem; display: flex; gap: 1.25rem; flex-wrap: wrap;
+           border-bottom: 1px solid #8884; }
+  header b { font-weight: 600; }
+  #dot { width: .6rem; height: .6rem; border-radius: 50%; background: #c33; align-self: center; }
+  #dot.on { background: #2a2; }
+  textarea { flex: 1; border: 0; padding: 1rem; font: 16px/1.5 ui-monospace, monospace; resize: none;
+             outline: none; background: transparent; color: inherit; }
+</style>
+<header>
+  <span id="dot" title="connection"></span>
+  <span>node <b id="node">-</b></span>
+  <span>peers <b id="peers">-</b></span>
+  <span>ops <b id="history">-</b></span>
+  <span>waiting <b id="waiting">-</b></span>
+  <span id="err"></span>
+</header>
+<textarea id="ta" spellcheck="false" autofocus></textarea>
+<script>
+const ta = document.getElementById('ta');
+const $ = id => document.getElementById(id);
+const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+// diff helpers
+const graphemes = s => Array.from(seg.segment(s), x => x.segment);
+
+// Common prefix/suffix diff on arrays or strings
+// which slice of `a` was replaced by which slice of `b`.
+function diffSeq(a, b) {
+  const m = Math.min(a.length, b.length);
+  let p = 0;
+  while (p < m && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < m - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  return { p, s, aEnd: a.length - s, bEnd: b.length - s };
+}
+
+// Edit in grapheme units, as the replica expects.
+function editFor(oldText, newText) {
+  const a = graphemes(oldText), b = graphemes(newText);
+  const d = diffSeq(a, b);
+  return { index: d.p, del: d.aEnd - d.p, ins: b.slice(d.p, d.bEnd).join('') };
+}
+
+// Where a caret at `pos` (UTF-16 units) in oldText lands in newText.
+function shiftCaret(oldText, newText, pos) {
+  const d = diffSeq(oldText, newText);
+  if (pos <= d.p) return pos;
+  if (pos >= d.aEnd) return pos + (d.bEnd - d.aEnd);
+  return d.p;
+}
+
+// sync loop
+let base = ''; // text as last confirmed by the replica
+let busy = false; // one request in flight at a time
+let composing = false;
+
+async function request(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
+  });
+  return r.json();
+}
+
+function setText(text) {
+  const [s, e] = [ta.selectionStart, ta.selectionEnd];
+  const old = ta.value;
+  ta.value = text;
+  ta.setSelectionRange(shiftCaret(old, text, s), shiftCaret(old, text, e));
+}
+
+function showStatus(st) {
+  $('node').textContent = st.node ?? '-';
+  $('peers').textContent = st.peers ? (st.peers.length ? st.peers.join(', ') : 'none') : '-';
+  $('history').textContent = st.history ?? '-';
+  $('waiting').textContent = st.waiting ?? '-';
+  $('err').textContent = st.error ?? (st.blocked ? 'edits blocked (restart with a new node name)' : '');
+}
+
+async function sync() {
+  if (busy || composing) return;
+  busy = true;
+  const sent = ta.value;
+  try {
+    const editing = sent !== base;
+    const st = editing ? await request('/edit', editFor(base, sent)) : await request('/state');
+    $('dot').classList.add('on');
+    showStatus(st);
+    if (typeof st.text === 'string') {
+      if (ta.value === sent) { // nothing typed meanwhile: replica text wins
+        base = st.text;
+        if (ta.value !== st.text) setText(st.text);
+      } else if (editing) { // typed during a POST: keep typing, rebase
+        base = st.text;
+      } // typed during a GET: drop the stale reply
+    }
+  } catch (e) {
+    $('dot').classList.remove('on');
+  } finally {
+    busy = false;
+    if (ta.value !== base) queueMicrotask(sync);
+  }
+}
+
+ta.addEventListener('input', () => { if (!composing) sync(); });
+ta.addEventListener('compositionstart', () => { composing = true; });
+ta.addEventListener('compositionend', () => { composing = false; sync(); });
+setInterval(sync, 400);
+sync();
+</script>

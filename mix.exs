@@ -41,6 +41,11 @@ defmodule Crdt.MixProject do
       {:ring_logger, "~> 0.11.0"},
       {:toolshed, "~> 0.5.0"},
 
+      # Local web editor (Crdt.Web)
+      {:plug, "~> 1.16"},
+      {:bandit, "~> 1.6"},
+      {:jason, "~> 1.4"},
+
       # Allow Nerves.Runtime on host to support development, testing and CI.
       # See config/host.exs for usage.
       {:nerves_runtime, "~> 0.13.12"},
