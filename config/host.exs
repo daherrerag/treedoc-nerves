@@ -19,3 +19,7 @@ config :nerves_runtime,
        "a.nerves_fw_platform" => "host",
        "a.nerves_fw_version" => "0.0.0"
      }}
+
+# Keep the /24 sweep off on host so a laptop on someone else's Wi-Fi
+# doesn't probe the subnet.  Turn it on with CRDT_SWEEP=on.
+config :crdt, sweep: System.get_env("CRDT_SWEEP") == "on"
