@@ -1,30 +1,24 @@
 defmodule Crdt.Treedoc do
   @moduledoc """
-  Treedoc CRDT.
-  One character per atom, keyed by its PosID.
+  Treedoc CRDT — one character per PosID.
 
-  * PosID: `{bit, seq, node}` with
-  `bit in 0..1`,
-  `seq >= 1`,
-  `node` an atom `:"doc@<ip>"`.
+  * PosID: list of steps `{bit, seq, node}` with `bit in 0..1`,
+    `seq >= 1`, `node` an atom.
   * State: `%{chars: %{PosID => grapheme}, dead: MapSet.new(PosID)}`.
-  * Order: in-order traversal: left child (bit 0) < parent < right child (bit 1).
-  * Insert: multi-character inserts are placed as a balanced subtree.
-  * Tie-break on a duplicate PosID — keep `min(existing, new)` grapheme.
+  * Order: in-order traversal — left child (bit 0) < parent < right child (bit 1).
+  * Insert: multi-char inserts form a balanced subtree (depth ~log₂ n).
+  * Tie-break on duplicate PosID: keep `min(existing, new)` grapheme.
   """
 
-   @doc "Empty document: no atoms, no tombstones."
+  @doc "Empty document."
   def new, do: %{chars: %{}, dead: MapSet.new()}
 
   @doc """
-  Strict less-than between two PosIDs, the in-order walk of [T] §3.1.
+  Strict less-than between two PosIDs (in-order walk).
 
-  * `[]` is the virtual root; it is never stored in `chars` but is used as the
-    left boundary when inserting at index 0.
-  * A left child (`bit = 0`) sorts before its parent, a right child (`bit = 1`)
-    after it.
-  * When two sibling steps differ, Erlang tuple order `{bit, seq, node}` breaks
-    the tie — exactly as in B's `menor?/2`.
+  `[]` is the virtual root (never stored in `chars`).  A left child (`bit = 0`)
+  sorts before its parent, a right child (`bit = 1`) after.  When sibling steps
+  differ, Erlang tuple order `{bit, seq, node}` breaks the tie.
   """
   def less_than?([], []), do: false
   def less_than?([], [{bit, _, _} | _]), do: bit == 1
@@ -32,7 +26,7 @@ defmodule Crdt.Treedoc do
   def less_than?([x | rest_a], [x | rest_b]), do: less_than?(rest_a, rest_b)
   def less_than?([x | _], [y | _]), do: x < y
 
-  @doc "Full order as a list of `{PosID, char}` pairs, tombstones included."
+  @doc "Full order as `{PosID, char}` pairs, tombstones included."
   def ordered(doc) do
     Enum.sort(Map.to_list(doc.chars), fn {p1, _}, {p2, _} -> less_than?(p1, p2) end)
   end
@@ -40,20 +34,17 @@ defmodule Crdt.Treedoc do
   @doc "Visible chars (tombstones removed), in order."
   def visible(doc), do: reject_dead(ordered(doc), doc.dead)
 
-  @doc "The visible text, as a binary."
-  def text(doc) do
-    Enum.map_join(visible(doc), fn {_, ch} -> ch end)
-  end
+  @doc "Visible text as a binary."
+  def text(doc), do: Enum.map_join(visible(doc), fn {_, ch} -> ch end)
 
   @doc """
-  Picks PosIDs for inserting `chars` (a list of graphemes) at visible index `i`,
-  starting at sequence number `seq0 + 1` for the first char and incrementing by
-  one per char.  Returns `{:ok, [{PosID, grapheme}, ...]}` in text order,
-  or `{:error, :invalid_index}`.
+  Picks PosIDs for inserting `chars` at visible index `i`, starting at
+  sequence `seq0 + 1`.  Returns `{:ok, [{PosID, grapheme}, ...]}` in text
+  order, or `{:error, :invalid_index}`.
 
-  The PosIDs form a balanced subtree rooted between the left neighbour `p`
-  (visible char at `i-1`, or `[]`) and the right neighbour `f` (next char after
-  `p` in the full order, tombstones included, or `nil`).
+  The PosIDs form a balanced subtree between the left neighbour `p` (visible
+  char at `i-1`, or `[]`) and the right neighbour `f` (next char after `p` in
+  the full order, or `nil`).
   """
   def prepare_insert(doc, i, chars, seq0, node) when is_integer(seq0) and seq0 >= 0 do
     order = ordered(doc)
@@ -71,7 +62,6 @@ defmodule Crdt.Treedoc do
 
   @doc """
   Picks PosIDs for deleting `n` visible chars starting at index `i`.
-  Returns `{:ok, [PosID, ...]}` or `{:error, :invalid_index}`.
   `i = 0, n = 0` returns `{:ok, []}` (no-op).
   """
   def prepare_delete(doc, i, n) do
@@ -85,13 +75,10 @@ defmodule Crdt.Treedoc do
   end
 
   @doc """
-  Applies one operation (`:ins` or `:del`) to the document.  Idempotent: applying the same op twice yields the same state.
+  Applies one op (`:ins` or `:del`).  Idempotent.
 
-  On insert, if the PosID is already present
-  (concurrent insert at the same path
-  only possible if `{seq, node}` collided,
-  which the protocol prevents)
-  keep the `min/2` of the two graphemes, exactly as B does.
+  On insert, if the PosID is already present, keep `min(existing, new)` — this
+  only matters if `{seq, node}` collided, which the protocol prevents.
   """
   def apply_op(doc, %{op: :ins, pos: posid, ch: ch}) do
     %{doc | chars: Map.update(doc.chars, posid, ch, fn other -> min(other, ch) end)}
@@ -101,41 +88,30 @@ defmodule Crdt.Treedoc do
     %{doc | dead: MapSet.put(doc.dead, posid)}
   end
 
-  # Build a balanced subtree: middle char between p and f, left half in the
-  # left subtree of the middle, right half in its right subtree.  Each char
-  # gets its own `{seq, node}` on the last step.
+  # Build a balanced subtree: middle char between `p` and `f`, left half in
+  # the left subtree, right half in the right subtree.
   defp balance([], _place, _node), do: []
 
   defp balance(chars, place, node) do
     {left, [{ch, seq} | right]} = Enum.split(chars, div(length(chars), 2))
     posid = place_at(place, seq, node)
-    mid = [{posid, ch, seq}]
 
-    mid ++
+    [{posid, ch, seq} |
       balance(left, {:child, posid, 0}, node) ++
-      balance(right, {:child, posid, 1}, node)
+      balance(right, {:child, posid, 1}, node)]
   end
 
   defp place_at({:between, p, f}, seq, node), do: new_posid(p, f, seq, node)
   defp place_at({:child, parent, bit}, seq, node), do: parent ++ [{bit, seq, node}]
 
-  # The new PosID lands strictly between `p` (left) and `f` (right):
-  #   * if `f` is in the subtree of `p` (`p` is a prefix of `f`), the new node
-  #     is the left child of `f`  -> `f ++ [{0, seq, node}]`
-  #   * otherwise (no right neighbour, or `f` is outside `p`'s subtree) the new
-  #     node is the right child of `p` -> `p ++ [{1, seq, node}]`
+  # New PosID lands strictly between `p` (left) and `f` (right):
+  #   * if `f` is in `p`'s subtree (`p` is a prefix of `f`): left child of `f`
+  #   * otherwise: right child of `p`
   defp new_posid(p, nil, seq, node), do: p ++ [{1, seq, node}]
   defp new_posid(p, f, seq, node) do
-    if List.starts_with?(f, p) do
-      f ++ [{0, seq, node}]
-    else
-      p ++ [{1, seq, node}]
-    end
+    if List.starts_with?(f, p), do: f ++ [{0, seq, node}], else: p ++ [{1, seq, node}]
   end
 
-  # Re-order the placed chars by their seq so the caller receives them in the
-  # order they will appear in the text (and in the order the replica numbers
-  # them in the vector clock: seq0+1, seq0+2, ...).
   defp in_text_order(placed) do
     placed
     |> Enum.sort_by(fn {_posid, _ch, seq} -> seq end)
