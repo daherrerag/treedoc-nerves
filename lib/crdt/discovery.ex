@@ -3,11 +3,11 @@ defmodule Crdt.Discovery do
   Peer discovery over the LAN.
 
   1. **Multicast announcement** — every 2 s, send a UDP packet with the tag
-   `"crdt-treedoc-1 "` and our node name to group `233.252.1.32:45892`.
-   Listen on the same group/port for peers.
-   2. **/24 sweep** — every 10 s, ask each address's epmd which Erlang nodes it
-   runs, and connect to the ones we don't know yet.  Catches peers whose
-   multicast is blocked by the router.
+     `"crdt-treedoc-1 "` and our node name to group `233.252.1.32:45892`.
+     Listen on the same group/port for peers.
+  2. **/24 sweep** — every 10 s, ask each address's epmd which Erlang nodes it
+     runs, and connect to the ones we don't know yet.  Catches peers whose
+     multicast is blocked by the router.
 
   The multicast values (group, port, tag, interval, immediate first announce)
   are the wire contract — any node using the same tag and group finds us and
@@ -15,13 +15,10 @@ defmodule Crdt.Discovery do
 
   ## Robustness
 
-  * The announced name is validated against a regex before it becomes an atom,
-  so a flood of garbage packets can't fill the atom table.
-  * At most `@max_names` (256) announced names are kept; past that, only
-  already-known names are retried.
+  * The announced name is validated against a regex before it becomes an atom.
+  * At most `@max_names` (256) announced names are kept.
   * A failed `Node.connect` is throttled for `@retry` (30 s) per peer.
-  * Everything from outside is handled without crashing; a packet that fails
-  to parse is dropped silently.
+  * Unknown packets are dropped silently.
   """
 
   use GenServer
@@ -36,8 +33,6 @@ defmodule Crdt.Discovery do
   @retry 30_000
   @max_names 256
 
-  # A valid announced name: up to 64 chars of [A-Za-z0-9_\-.], then "@", then
-  # an IPv4 in dotted-quad form.
   @name_regex ~r/\A[A-Za-z0-9_\-.]{1,64}@\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z/
 
   @doc "Options: `:me`, `:ip`, `:port`."
@@ -66,8 +61,16 @@ defmodule Crdt.Discovery do
     send(self(), :announce)
     Process.send_after(self(), :sweep, @first_sweep)
 
-    {:ok, %{me: me, port: port, socket: open_socket(ip), ip: ip,
-            failed: %{}, sweeping: nil, names: MapSet.new()}}
+    {:ok,
+     %{
+       me: me,
+       port: port,
+       socket: open_socket(ip),
+       ip: ip,
+       failed: %{},
+       sweeping: nil,
+       names: MapSet.new()
+     }}
   end
 
   @impl true
@@ -78,8 +81,6 @@ defmodule Crdt.Discovery do
   @impl true
   def handle_info(:announce, state) do
     Process.send_after(self(), :announce, @announce_every)
-
-    # Re-open the socket if our IP changed (e.g. DHCP renewal).
     state = reopen(state, own_ip(state.me))
 
     if state.socket != nil do
@@ -101,9 +102,6 @@ defmodule Crdt.Discovery do
   def handle_info(:sweep, state) do
     Process.send_after(self(), :sweep, @sweep_every)
     ip = own_ip(state.me)
-
-    # The sweep is opt-in: it can be disabled with `CRDT_SWEEP=off` so a laptop
-    # on someone else's network doesn't probe it.
     enabled = Application.get_env(:crdt, :sweep, true)
 
     if ip != nil and state.sweeping == nil and enabled do
@@ -129,7 +127,6 @@ defmodule Crdt.Discovery do
     {:noreply, state}
   end
 
-  # Connect attempt resolved: clear the throttle on success.
   def handle_info({:attempt, node, true}, state) do
     {:noreply, %{state | failed: Map.delete(state.failed, node)}}
   end
@@ -163,8 +160,8 @@ defmodule Crdt.Discovery do
 
   defp new_peer?(node), do: node != node() and node not in Node.list()
 
-  # Reopen the socket only if our own IP changed since the last open.
   defp reopen(%{ip: ip} = state, ip), do: state
+
   defp reopen(state, ip) do
     if state.socket != nil, do: :gen_udp.close(state.socket)
     %{state | socket: open_socket(ip), ip: ip}
@@ -173,8 +170,14 @@ defmodule Crdt.Discovery do
   defp open_socket(nil), do: nil
 
   defp open_socket(ip) do
-    opts = [:binary, active: true, reuseaddr: true,
-            multicast_ttl: 1, multicast_loop: true, multicast_if: ip]
+    opts = [
+      :binary,
+      active: true,
+      reuseaddr: true,
+      multicast_ttl: 1,
+      multicast_loop: true,
+      multicast_if: ip
+    ]
 
     case :gen_udp.open(@port, opts ++ [add_membership: {@group, ip}]) do
       {:ok, socket} -> socket
@@ -182,8 +185,6 @@ defmodule Crdt.Discovery do
     end
   end
 
-  # The port is busy (another listener on this host): open an ephemeral socket
-  # just to send announcements.
   defp announce_only(opts) do
     case :gen_udp.open(0, opts) do
       {:ok, socket} -> socket
@@ -230,9 +231,6 @@ defmodule Crdt.Discovery do
     end
   end
 
-  # Enumerate the host addresses in our subnet (at least a /24), skipping the
-  # network and broadcast addresses.  Returns strings so they can be passed to
-  # :inet.parse_ipv4_address without round-tripping through tuples.
   defp neighbours(joined, prefix) do
     [a, b, c, d] = String.split(joined, ".") |> Enum.map(&String.to_integer/1)
     size = Integer.pow(2, 32 - max(prefix, 24))
@@ -268,8 +266,6 @@ defmodule Crdt.Discovery do
   defp count_set_bits(0), do: 0
   defp count_set_bits(byte), do: rem(byte, 2) + count_set_bits(div(byte, 2))
 
-  # The multicast interface is the IP of our node name, if it is an IPv4.
-  # Loopback (127.0.0.1) returns nil so the socket is opened on 0.0.0.0 instead.
   defp own_ip(me) do
     if Node.alive?() do
       [_, host] = String.split(Atom.to_string(me), "@")

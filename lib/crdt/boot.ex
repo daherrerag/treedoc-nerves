@@ -1,12 +1,14 @@
 defmodule Crdt.Boot do
   @moduledoc """
-  One GenServer, started by `Crdt.Application` under `Crdt.DynSup`, waits for `wlan0` to get an IPv4 from VintageNet.
+  Waits for `wlan0` to get an IPv4 from VintageNet, then:
+
   1. Starts `epmd -daemon`.
-  2. Set Erlang distribution port: `4218..4228`.
-  3. Starts the node in longnames mode. `doc@<ip>`
-  4. Sets cookie `cpd2026`.
-  5. Starts `Replica` and `Discovery` under `DynSup`.
+  2. Sets the distribution port range to `4218..4228`.
+  3. Starts the node in longnames mode as `doc@<ip>`.
+  4. Sets the magic cookie to `:cpd2026`.
+  5. Starts `Crdt.Replica` and `Crdt.Discovery` under `Crdt.DynSup`.
   """
+
   use GenServer
   require Logger
 
@@ -54,7 +56,7 @@ defmodule Crdt.Boot do
         start_child({Crdt.Replica, [data_dir: @data_dir]})
         start_child({Crdt.Discovery, []})
 
-        Logger.info("crdt node #{node} started (cookie #{@cookie})")
+        Logger.info("crdt node #{node} started")
         %{state | started?: true}
 
       {:error, reason} ->
@@ -67,8 +69,6 @@ defmodule Crdt.Boot do
   defp ensure_distribution(node) do
     start_epmd()
 
-    # Same port range in vm.args.eex.
-    # Set via application env so it takes effect even though vm.args.eex does not hard-code it.
     :application.set_env(:kernel, :inet_dist_listen_min, 4218)
     :application.set_env(:kernel, :inet_dist_listen_max, 4228)
 
@@ -79,7 +79,6 @@ defmodule Crdt.Boot do
     end
   end
 
-  # epmd daemon starter
   defp start_epmd do
     case System.cmd("epmd", ["-daemon"], stderr_to_stdout: true) do
       {_out, 0} -> :ok
@@ -98,7 +97,7 @@ defmodule Crdt.Boot do
     end
   end
 
-  # First non-link-local IPv4 VintageNet reports on @iface.
+  # First non-link-local IPv4 on @iface.
   defp ipv4 do
     case VintageNet.get(["interface", @iface, "addresses"]) do
       [_ | _] = addrs ->
