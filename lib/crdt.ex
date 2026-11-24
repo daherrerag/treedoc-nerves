@@ -1,40 +1,38 @@
 defmodule Crdt do
   @moduledoc """
-  Collaborative text editor with no central server (REQ1), on Treedoc; small modules (CON5, DES8).
-  IEx API (CON6, DES9). Codes such as REQ7 or PAP3.1: README.md, "How to read this project".
+  Collaborative text editor over Treedoc, with no central server.
+
+  IEx API.  All calls go to the `Crdt.Replica` GenServer (registered under the
+  atom `Crdt.Replica`.
   """
 
   alias Crdt.Replica
 
-  @doc "Inserts each character of `text` starting at `index`, in one call (REQ3, REQ20)."
+  @doc "Inserts each character of `text` starting at `index`."
   def insert(index, text) when is_binary(text), do: call({:insert, index, text})
 
-  @doc "Deletes `count` characters starting at `index`; all or nothing (REQ4)."
+  @doc "Deletes `count` characters starting at `index` (default 1)."
   def delete(index, count \\ 1), do: call({:delete, index, count})
 
-  @doc "Visible text of this node's whole copy (REQ2)."
+  @doc "Visible text of this node's whole copy."
   def text, do: call(:text)
 
-  @doc "Prints node, files, table, discovery, connected nodes, clock, history, waiting ops (REQ17)."
-  def status, do: print(call(:status))
+  @doc "Summary map: node, peers, clock, waiting, history size, counters..."
+  def status, do: call(:status)
 
-  @doc "Prints the last 10 applied ops, after `... N earlier ops` if there are more (REQ17)."
-  def history, do: print(call({:history, :last}))
+  @doc "List of applied ops in application order (newest last)."
+  def history, do: call(:history)
 
-  @doc "With `:all`, prints every applied op in the order it was applied."
-  def history(:all), do: print(call({:history, :all}))
+  @doc "Each char with its PosID and deleted? flag, as `{ch, pos, dead?}`."
+  def debug, do: call(:debug)
 
-  @doc "Prints every character with its PosID and whether it is deleted."
-  def debug, do: print(call(:debug))
-
-  # DES9: without a replica every function returns {:error, :no_replica}
+  # 1m timeout
+  # on no-replica / exit we return a tuple
+  # readable reply instead of an exit.
   defp call(request) do
-    if Process.whereis(Replica),
-      do: GenServer.call(Replica, request),
-      else: {:error, :no_replica}
+    GenServer.call(Replica, request, 60_000)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :no_replica}
   end
-
-  # DES9: print in the caller's console, also from a remote shell
-  defp print(lines) when is_list(lines), do: Enum.each(lines, &IO.puts/1)
-  defp print(error), do: error
 end

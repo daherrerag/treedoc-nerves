@@ -1,9 +1,17 @@
 defmodule Crdt.Boot do
+  @moduledoc """
+  One GenServer, started by `Crdt.Application` under `Crdt.DynSup`, waits for `wlan0` to get an IPv4 from VintageNet.
+  1. Starts `epmd -daemon`.
+  2. Set Erlang distribution port: `4218..4228`.
+  3. Starts the node in longnames mode. `doc@<ip>`
+  4. Sets cookie `cpd2026`.
+  5. Starts `Replica` and `Discovery` under `DynSup`.
+  """
   use GenServer
   require Logger
 
-  @name "doc"
   @iface "wlan0"
+  @short_name "doc"
   @cookie :cpd2026
   @data_dir "/data/crdt"
 
@@ -36,7 +44,7 @@ defmodule Crdt.Boot do
   end
 
   defp start_everything(ip, state) do
-    node = :"#{@name}@#{:inet.ntoa(ip)}"
+    node = :"#{@short_name}@#{:inet.ntoa(ip)}"
 
     case ensure_distribution(node) do
       :ok ->
@@ -46,7 +54,7 @@ defmodule Crdt.Boot do
         start_child({Crdt.Replica, [data_dir: @data_dir]})
         start_child({Crdt.Discovery, []})
 
-        Logger.info("crdt node #{node} started")
+        Logger.info("crdt node #{node} started (cookie #{@cookie})")
         %{state | started?: true}
 
       {:error, reason} ->
@@ -59,7 +67,8 @@ defmodule Crdt.Boot do
   defp ensure_distribution(node) do
     start_epmd()
 
-    # Puertos del start.sh del repo original
+    # Same port range in vm.args.eex.
+    # Set via application env so it takes effect even though vm.args.eex does not hard-code it.
     :application.set_env(:kernel, :inet_dist_listen_min, 4218)
     :application.set_env(:kernel, :inet_dist_listen_max, 4228)
 
@@ -70,8 +79,7 @@ defmodule Crdt.Boot do
     end
   end
 
-  # El firmware no arranca epmd solo
-  # No suelen haber problemas si epmd ya esta corriendo y este ejecuta
+  # epmd daemon starter
   defp start_epmd do
     case System.cmd("epmd", ["-daemon"], stderr_to_stdout: true) do
       {_out, 0} -> :ok
@@ -90,16 +98,7 @@ defmodule Crdt.Boot do
     end
   end
 
-  # de start.sh
-  #defp hostname do
-  #  {:ok, host} = :inet.gethostname()
-
-  #  host
-  #  |> List.to_string()
-  #  |> String.downcase()
-  #  |> String.replace(~r/[^a-z0-9_-]/, "_")
-  #end
-
+  # First non-link-local IPv4 VintageNet reports on @iface.
   defp ipv4 do
     case VintageNet.get(["interface", @iface, "addresses"]) do
       [_ | _] = addrs ->

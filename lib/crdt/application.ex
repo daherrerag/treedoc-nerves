@@ -10,7 +10,12 @@ defmodule Crdt.Application do
     Supervisor.start_link(children(@target), opts)
   end
 
-  defp children(:host), do: []
+  defp children(:host) do
+  # Host starts no children.
+  # tests supervise their own Replica with a per-test history file.
+  # An auto-started one would collide on the registered name Crdt.Replica.
+    []
+  end
 
   defp children(_target) do
     [
