@@ -2,8 +2,8 @@ defmodule Crdt do
   @moduledoc """
   Collaborative text editor over Treedoc, with no central server.
 
-  IEx API.  All calls go to the `Crdt.Replica` GenServer (registered under the
-  atom `Crdt.Replica`.
+  IEx API.  All calls go to the `Crdt.Replica` GenServer (registered as
+  `Crdt.Replica`).
   """
 
   alias Crdt.Replica
@@ -14,10 +14,10 @@ defmodule Crdt do
   @doc "Deletes `count` characters starting at `index` (default 1)."
   def delete(index, count \\ 1), do: call({:delete, index, count})
 
-  @doc "Visible text of this node's whole copy."
+  @doc "Visible text of this node's copy."
   def text, do: call(:text)
 
-  @doc "Summary map: node, peers, clock, waiting, history size, counters..."
+  @doc "Summary map: node, peers, clock, waiting, counters, etc."
   def status, do: call(:status)
 
   @doc "List of applied ops in application order (newest last)."
@@ -26,9 +26,7 @@ defmodule Crdt do
   @doc "Each char with its PosID and deleted? flag, as `{ch, pos, dead?}`."
   def debug, do: call(:debug)
 
-  # 1m timeout
-  # on no-replica / exit we return a tuple
-  # readable reply instead of an exit.
+  # 60 s timeout.  On no-replica or exit, returns a tuple instead of crashing.
   defp call(request) do
     GenServer.call(Replica, request, 60_000)
   catch
