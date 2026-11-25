@@ -7,6 +7,10 @@ defmodule Crdt.Treedoc do
   * State: `%{chars: %{PosID => grapheme}, dead: MapSet.new(PosID)}`.
   * Order: in-order traversal — left child (bit 0) < parent < right child (bit 1).
   * Insert: multi-char inserts form a balanced subtree (depth ~log₂ n).
+  * Edits can be addressed by visible index (`prepare_insert/5`,
+    `prepare_delete/3`) or by PosID (`prepare_insert_after/5`,
+    `prepare_delete_ids/2`).  PosID addressing does not depend on the
+    document being unchanged since the caller last looked at it.
   * Tie-break on duplicate PosID: keep `min(existing, new)` grapheme.
   """
 
@@ -51,14 +55,34 @@ defmodule Crdt.Treedoc do
     visibles = reject_dead(order, doc.dead)
 
     if is_integer(i) and i >= 0 and i <= length(visibles) do
-      p = left_neighbour(visibles, i)
-      place = {:between, p, right_neighbour(order, p)}
-      placed = balance(Enum.with_index(chars, seq0 + 1), place, node)
-      {:ok, in_text_order(placed)}
+      {:ok, place_after(order, left_neighbour(visibles, i), chars, seq0, node)}
     else
       {:error, :invalid_index}
     end
   end
+
+  @doc """
+  Like `prepare_insert/5`, but the text goes right after the char whose PosID
+  is `anchor` (`[]` = start of the document) instead of after a visible index.
+
+  The anchor may be a tombstone: the new PosIDs still land strictly between
+  the anchor and its successor in the full order, so the placement rule (and
+  the ops it produces) is the same as for an index.  Returns
+  `{:error, :unknown_anchor}` if the anchor was never inserted here.
+  """
+  def prepare_insert_after(doc, anchor, chars, seq0, node)
+      when is_list(anchor) and is_integer(seq0) and seq0 >= 0 do
+    if anchor == [] or has?(doc, anchor) do
+      {:ok, place_after(ordered(doc), anchor, chars, seq0, node)}
+    else
+      {:error, :unknown_anchor}
+    end
+  end
+
+  def prepare_insert_after(_doc, _anchor, _chars, _seq0, _node), do: {:error, :unknown_anchor}
+
+  @doc "True if `posid` was inserted in this document (it may be a tombstone)."
+  def has?(doc, posid), do: Map.has_key?(doc.chars, posid)
 
   @doc """
   Picks PosIDs for deleting `n` visible chars starting at index `i`.
@@ -75,6 +99,23 @@ defmodule Crdt.Treedoc do
   end
 
   @doc """
+  Picks the PosIDs to delete for a list of PosIDs the caller saw.
+
+  Duplicates and ids that are already tombstones are dropped (no point in
+  sending a second delete).  Returns `{:error, :unknown_id}` if any id was
+  never inserted here, `{:error, :invalid_ids}` if `ids` is not a list.
+  """
+  def prepare_delete_ids(doc, ids) when is_list(ids) do
+    if Enum.all?(ids, &has?(doc, &1)) do
+      {:ok, ids |> Enum.uniq() |> Enum.reject(&MapSet.member?(doc.dead, &1))}
+    else
+      {:error, :unknown_id}
+    end
+  end
+
+  def prepare_delete_ids(_doc, _ids), do: {:error, :invalid_ids}
+
+  @doc """
   Applies one op (`:ins` or `:del`).  Idempotent.
 
   On insert, if the PosID is already present, keep `min(existing, new)` — this
@@ -86,6 +127,13 @@ defmodule Crdt.Treedoc do
 
   def apply_op(doc, %{op: :del, pos: posid}) do
     %{doc | dead: MapSet.put(doc.dead, posid)}
+  end
+
+  # PosIDs for `chars` between `p` and its successor in the full order, in text order.
+  defp place_after(order, p, chars, seq0, node) do
+    place = {:between, p, right_neighbour(order, p)}
+    placed = balance(Enum.with_index(chars, seq0 + 1), place, node)
+    in_text_order(placed)
   end
 
   # Build a balanced subtree: middle char between `p` and `f`, left half in

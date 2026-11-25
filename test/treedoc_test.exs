@@ -72,6 +72,64 @@ defmodule Crdt.TreedocTest do
     assert length(Treedoc.visible(d)) == 3
   end
 
+  defp posid_at(d, i), do: d |> Treedoc.visible() |> Enum.at(i) |> elem(0)
+
+  defp apply_ins(d, posids) do
+    Enum.reduce(posids, d, fn {p, c}, d -> Treedoc.apply_op(d, %{op: :ins, pos: p, ch: c}) end)
+  end
+
+  test "insert after an anchor gives the same PosIDs as insert at the index" do
+    {d, _} = write(Treedoc.new(), 0, "hola", 0, :a)
+    d = Treedoc.apply_op(d, %{op: :del, pos: posid_at(d, 1)})
+
+    for i <- 0..3 do
+      anchor = if i == 0, do: [], else: posid_at(d, i - 1)
+
+      assert Treedoc.prepare_insert_after(d, anchor, ["x", "y"], 4, :b) ==
+               Treedoc.prepare_insert(d, i, ["x", "y"], 4, :b)
+    end
+  end
+
+  test "an anchor keeps the text next to its char after a concurrent edit" do
+    {base, _} = write(Treedoc.new(), 0, "abc", 0, :a)
+    b = posid_at(base, 1)
+
+    # :b inserts X between b and c while :a, still looking at "abc", anchors Y after b.
+    {with_x, x} = write(base, 2, "X", 0, :b)
+    {:ok, y} = Treedoc.prepare_insert_after(with_x, b, ["Y"], 3, :a)
+
+    r1 = apply_ins(with_x, y)
+    r2 = apply_ins(apply_ins(base, y), x)
+
+    assert Treedoc.text(r1) == "abYXc"
+    assert Treedoc.text(r2) == "abYXc"
+  end
+
+  test "the anchor may be a tombstone, [] is the start, an unknown anchor is rejected" do
+    {d, _} = write(Treedoc.new(), 0, "abc", 0, :a)
+    dead = Treedoc.apply_op(d, %{op: :del, pos: posid_at(d, 1)})
+
+    {:ok, y} = Treedoc.prepare_insert_after(dead, posid_at(d, 1), ["Y"], 3, :a)
+    assert Treedoc.text(apply_ins(dead, y)) == "aYc"
+
+    {:ok, z} = Treedoc.prepare_insert_after(d, [], ["Z"], 3, :a)
+    assert Treedoc.text(apply_ins(d, z)) == "Zabc"
+
+    assert {:ok, [_]} = Treedoc.prepare_insert_after(Treedoc.new(), [], ["x"], 0, :a)
+    assert Treedoc.prepare_insert_after(d, [{1, 99, :zz}], ["x"], 3, :a) == {:error, :unknown_anchor}
+    assert Treedoc.prepare_insert_after(d, :nope, ["x"], 3, :a) == {:error, :unknown_anchor}
+  end
+
+  test "prepare_delete_ids drops dead and repeated ids, rejects unknown ones" do
+    {d, _} = write(Treedoc.new(), 0, "abc", 0, :a)
+    [a, b, c] = Enum.map(Treedoc.visible(d), &elem(&1, 0))
+    d = Treedoc.apply_op(d, %{op: :del, pos: b})
+
+    assert Treedoc.prepare_delete_ids(d, [a, b, a, c]) == {:ok, [a, c]}
+    assert Treedoc.prepare_delete_ids(d, [[{1, 99, :zz}]]) == {:error, :unknown_id}
+    assert Treedoc.prepare_delete_ids(d, :nope) == {:error, :invalid_ids}
+  end
+
   defp simulate do
     nodes = [:a, :b, :c]
     initial = Map.new(nodes, fn n -> {n, %{doc: Treedoc.new(), vc: %{}, buffer: []}} end)
