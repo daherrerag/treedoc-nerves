@@ -72,6 +72,76 @@ defmodule Crdt.ReplicaTest do
     assert Crdt.text() == "h"
   end
 
+  defp visible_posids, do: for({_ch, p, false} <- Crdt.debug(), do: p)
+
+  describe "edit/1 (anchored, atomic)" do
+    test "deletes then inserts in one go, with consecutive sequence numbers" do
+      start_supervised!(Crdt.Replica)
+      :ok = Crdt.insert(0, "hello")
+      [h, e, l1, l2, o] = visible_posids()
+      n = length(Crdt.history())
+
+      assert Crdt.edit(%{del: [e, l1, l2], anchor: h, ins: "ipp"}) == :ok
+      assert Crdt.text() == "hippo"
+      assert o in visible_posids()
+
+      new_ops = Enum.drop(Crdt.history(), n)
+      assert Enum.map(new_ops, & &1.op) == [:del, :del, :del, :ins, :ins, :ins]
+      # "hello" used seqs 1..5; the edit continues with 6..8 (deletes) and 9..11 (inserts).
+      assert Enum.map(new_ops, fn op -> op.vc[op.from] end) == Enum.to_list(6..11)
+    end
+
+    test "survives the log: a restart rebuilds the edited text" do
+      start_supervised!(Crdt.Replica)
+      :ok = Crdt.insert(0, "abc")
+      [a, b, _c] = visible_posids()
+      :ok = Crdt.edit(%{del: [b], anchor: a, ins: "XY"})
+      assert Crdt.text() == "aXYc"
+
+      stop_supervised!(Crdt.Replica)
+      start_supervised!(Crdt.Replica)
+      assert Crdt.text() == "aXYc"
+    end
+
+    test "a stale view still works: dead anchor, already-deleted ids" do
+      start_supervised!(Crdt.Replica)
+      :ok = Crdt.insert(0, "abc")
+      [_a, b, _c] = visible_posids()
+      :ok = Crdt.delete(1, 1)
+      n = length(Crdt.history())
+
+      assert Crdt.edit(%{anchor: b, ins: "Y"}) == :ok
+      assert Crdt.text() == "aYc"
+
+      n = n + 1
+      assert Crdt.edit(%{del: [b], anchor: [], ins: ""}) == :ok
+      assert length(Crdt.history()) == n
+    end
+
+    test "errors apply nothing" do
+      start_supervised!(Crdt.Replica)
+      :ok = Crdt.insert(0, "abc")
+      [a, _b, _c] = visible_posids()
+      n = length(Crdt.history())
+      ghost = [{1, 99, :zz}]
+
+      assert Crdt.edit(%{del: [a], anchor: ghost, ins: "x"}) == {:error, :unknown_anchor}
+      assert Crdt.edit(%{del: [ghost], anchor: [], ins: "x"}) == {:error, :unknown_id}
+      assert Crdt.edit(%{ins: <<255>>}) == {:error, :invalid_text}
+      assert Crdt.edit(%{del: :nope}) == {:error, :invalid_args}
+      assert Crdt.edit(:nope) == {:error, :invalid_args}
+
+      assert Crdt.text() == "abc"
+      assert length(Crdt.history()) == n
+    end
+
+    test "an empty edit is a no-op" do
+      start_supervised!(Crdt.Replica)
+      assert Crdt.edit(%{}) == :ok
+      assert Crdt.history() == []
+    end
+  end
+
   defp random_term do
     Enum.at(
       [:garbage, {:remote, %{}}, {:hello, "not_atom"}, %{},

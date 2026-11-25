@@ -158,6 +158,28 @@ defmodule Crdt.Replica do
     end
   end
 
+  # Atomic edit addressed by PosID: delete `del`, then insert `ins` right after
+  # `anchor`.  One validate / persist / broadcast for the whole edit, so no
+  # remote op can land between the delete and the insert, and a failure leaves
+  # nothing applied.
+  @impl true
+  def handle_call({:edit, _edit}, _from, %{blocked: true} = state) do
+    {:reply, {:error, :blocked}, state}
+  end
+
+  def handle_call({:edit, %{del: ids, anchor: anchor, ins: text}}, _from, state)
+      when is_list(ids) and is_list(anchor) and is_binary(text) do
+    if String.valid?(text) do
+      edit(ids, anchor, String.graphemes(text), state)
+    else
+      {:reply, {:error, :invalid_text}, state}
+    end
+  end
+
+  def handle_call({:edit, _edit}, _from, state) do
+    {:reply, {:error, :invalid_args}, state}
+  end
+
   # --------------------------------------------------------------- queries
 
   @impl true
@@ -252,6 +274,37 @@ defmodule Crdt.Replica do
     op = %{op: :ins, from: me, vc: Map.put(vc, me, seq), pos: posid, ch: ch}
     [op | ins_ops(rest, seq + 1, me, vc)]
   end
+
+  # ------------------------------------------------------------- edit impl
+
+  defp edit([], _anchor, [], state), do: {:reply, :ok, state}
+
+  defp edit(ids, anchor, chars, state) do
+    with {:ok, del_ids} <- Treedoc.prepare_delete_ids(state.doc, ids),
+         {:ok, me, state} <- author(state, del_ids ++ chars) do
+      do_edit(del_ids, anchor, chars, me, state)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Deletes take seqs seq0+1..seq0+k, the insert continues after them.  New
+  # PosIDs are placed on the current doc; tombstones do not change the full
+  # order, so it makes no difference that the deletes are not applied yet.
+  defp do_edit(del_ids, anchor, chars, me, state) do
+    seq0 = Map.get(state.vc, me, 0)
+    dels = del_ops(del_ids, seq0 + 1, me, state.vc)
+    seq1 = seq0 + length(dels)
+
+    case prepare_ins(state.doc, anchor, chars, seq1, me) do
+      {:ok, posids} -> local_ops(dels ++ ins_ops(posids, seq1 + 1, me, state.vc), state)
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # A pure delete needs no anchor, so a stale one is not an error.
+  defp prepare_ins(_doc, _anchor, [], _seq, _me), do: {:ok, []}
+  defp prepare_ins(doc, anchor, chars, seq, me), do: Treedoc.prepare_insert_after(doc, anchor, chars, seq, me)
 
   # ----------------------------------------------------------- delete impl
 

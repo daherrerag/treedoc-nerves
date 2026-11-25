@@ -14,6 +14,18 @@ defmodule Crdt do
   @doc "Deletes `count` characters starting at `index` (default 1)."
   def delete(index, count \\ 1), do: call({:delete, index, count})
 
+  @doc """
+  Atomic edit addressed by PosID instead of index.
+
+  Deletes the chars in `:del` (PosIDs), then inserts `:ins` right after the
+  char `:anchor` (`[]` = start).  Both are optional.  Returns `:ok`, or
+  `{:error, reason}` with nothing applied.  PosIDs come from `debug/0`.
+
+      Crdt.edit(%{del: [posid_of_b], anchor: posid_of_a, ins: "XY"})
+  """
+  def edit(%{} = edit), do: call({:edit, Map.merge(%{del: [], anchor: [], ins: ""}, edit)})
+  def edit(_), do: {:error, :invalid_args}
+
   @doc "Visible text of this node's copy."
   def text, do: call(:text)
 
