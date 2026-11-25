@@ -25,47 +25,84 @@
 <script>
 const ta = document.getElementById('ta');
 const $ = id => document.getElementById(id);
-const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
-// diff helpers
-const graphemes = s => Array.from(seg.segment(s), x => x.segment);
+// helpers
+const join = atoms => atoms.map(a => a.ch).join('');
 
-// Common prefix/suffix diff on arrays or strings
-// which slice of `a` was replaced by which slice of `b`.
-function diffSeq(a, b) {
+// Smallest changed region between strings a and b
+// by UTF-16 unit, never splitting a surrogate pair:
+// a[p, aEnd) was replaced by b[p, bEnd).
+function diffStr(a, b) {
   const m = Math.min(a.length, b.length);
   let p = 0;
-  while (p < m && a[p] === b[p]) p++;
+  while (p < m && a.charCodeAt(p) === b.charCodeAt(p)) p++;
+  if (p > 0 && isHigh(a.charCodeAt(p - 1))) p--;
   let s = 0;
-  while (s < m - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
-  return { p, s, aEnd: a.length - s, bEnd: b.length - s };
+  while (s < m - p && a.charCodeAt(a.length - 1 - s) === b.charCodeAt(b.length - 1 - s)) s++;
+  if (s > 0 && isLow(a.charCodeAt(a.length - s))) s--;
+  return { p, aEnd: a.length - s, bEnd: b.length - s };
+}
+const isHigh = c => c >= 0xd800 && c <= 0xdbff;
+const isLow = c => c >= 0xdc00 && c <= 0xdfff;
+
+// The edit the replica expects, addressed by PosID.  `atoms` is what the
+// replica last confirmed ([{id, ch}], one per CRDT char); `str` is the text.
+// The changed region is widened to whole atoms, because gluing chars together
+// (e + combining accent) can re-segment graphemes in the browser.
+function editFor(atoms, str) {
+  const old = join(atoms);
+  const d = diffStr(old, str);
+  const off = [0];
+  for (const a of atoms) off.push(off[off.length - 1] + a.ch.length);
+  let pi = 0;
+  while (pi + 1 < off.length && off[pi + 1] <= d.p) pi++; // last atom boundary <= start
+  let qi = pi;
+  while (off[qi] < d.aEnd) qi++; // first atom boundary >= end
+  return {
+    del: atoms.slice(pi, qi).map(a => a.id),
+    after: pi === 0 ? [] : atoms[pi - 1].id,
+    ins: str.slice(off[pi], str.length - (old.length - off[qi]))
+  };
 }
 
-// Edit in grapheme units, as the replica expects.
-function editFor(oldText, newText) {
-  const a = graphemes(oldText), b = graphemes(newText);
-  const d = diffSeq(a, b);
-  return { index: d.p, del: d.aEnd - d.p, ins: b.slice(d.p, d.bEnd).join('') };
+// The user typed sent -> cur while the replica went sent -> server.
+// Replay the typing on top of server.
+// If both touched the same region the remote version wins
+// (the typed chars of that overlap are dropped).
+function rebase(sent, cur, server) {
+  const L = diffStr(sent, cur), R = diffStr(sent, server);
+  const typed = cur.slice(L.p, L.bEnd);
+  if (L.aEnd <= R.p) return server.slice(0, L.p) + typed + server.slice(L.aEnd);
+  if (L.p >= R.aEnd) {
+    const d = R.bEnd - R.aEnd;
+    return server.slice(0, L.p + d) + typed + server.slice(L.aEnd + d);
+  }
+  return server;
 }
 
 // Where a caret at `pos` (UTF-16 units) in oldText lands in newText.
 function shiftCaret(oldText, newText, pos) {
-  const d = diffSeq(oldText, newText);
+  const d = diffStr(oldText, newText);
   if (pos <= d.p) return pos;
   if (pos >= d.aEnd) return pos + (d.bEnd - d.aEnd);
   return d.p;
 }
 
 // sync loop
-let base = ''; // text as last confirmed by the replica
+let atoms = [];// [{id, ch}] as last confirmed by the replica
+let base = ''; // join(atoms)
 let busy = false; // one request in flight at a time
 let composing = false;
+let fails = 0; // consecutive failed rounds, for the backoff
+let timer = null;
+
+const schedule = ms => { clearTimeout(timer); timer = setTimeout(sync, ms); };
 
 async function request(path, body) {
   const r = await fetch(path, body === undefined ? {} : {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body)
   });
-  return r.json();
+  return { ok: r.ok, st: await r.json() };
 }
 
 function setText(text) {
@@ -83,34 +120,53 @@ function showStatus(st) {
   $('err').textContent = st.error ?? (st.blocked ? 'edits blocked (restart with a new node name)' : '');
 }
 
+// Take the replica's reply as the new confirmed state.
+function adopt(st, sent, editing) {
+  const server = join(st.chars);
+  const cur = ta.value;
+  if (cur === sent) {// nothing typed meanwhile: replica text wins
+    atoms = st.chars; base = server;
+    if (cur !== server) setText(server);
+  } else if (editing) {// typed during a POST: keep typing on top of the reply
+    atoms = st.chars; base = server;
+    if (server !== sent) setText(rebase(sent, cur, server));
+  } // typed during a GET: stale reply, drop it
+}
+
 async function sync() {
   if (busy || composing) return;
   busy = true;
   const sent = ta.value;
+  const editing = sent !== base;
+  let ok = false;
   try {
-    const editing = sent !== base;
-    const st = editing ? await request('/edit', editFor(base, sent)) : await request('/state');
+    const { ok: good, st } = await request(editing ? '/edit' : '/state',
+      editing ? editFor(atoms, sent) : undefined);
     $('dot').classList.add('on');
     showStatus(st);
-    if (typeof st.text === 'string') {
-      if (ta.value === sent) { // nothing typed meanwhile: replica text wins
-        base = st.text;
-        if (ta.value !== st.text) setText(st.text);
-      } else if (editing) { // typed during a POST: keep typing, rebase
-        base = st.text;
-      } // typed during a GET: drop the stale reply
-    }
+    if (Array.isArray(st.chars)) adopt(st, sent, editing);
+    ok = good;
   } catch (e) {
     $('dot').classList.remove('on');
   } finally {
     busy = false;
-    if (ta.value !== base) queueMicrotask(sync);
+    fails = ok ? 0 : fails + 1;
+    const unsent = ta.value !== base;
+    if (ok) {
+      schedule(unsent ? 0 : 400);
+    } else {
+      const wait = Math.min(400 * 2 ** fails, 5000);
+      if (!$('dot').classList.contains('on'))
+        $('err').textContent = `offline, retrying in ${Math.round(wait / 1000)} s` +
+          (unsent ? ' (unsent edits kept)' : '');
+      schedule(wait);
+    }
   }
 }
 
-ta.addEventListener('input', () => { if (!composing) sync(); });
+ta.addEventListener('input', () => { if (!composing && fails === 0) schedule(0); });
 ta.addEventListener('compositionstart', () => { composing = true; });
-ta.addEventListener('compositionend', () => { composing = false; sync(); });
-setInterval(sync, 400);
+ta.addEventListener('compositionend', () => { composing = false; schedule(0); });
+window.addEventListener('online', () => { fails = 0; schedule(0); });
 sync();
 </script>

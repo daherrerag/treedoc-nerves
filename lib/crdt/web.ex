@@ -2,19 +2,21 @@ defmodule Crdt.Web do
   @moduledoc """
   Tiny local web editor for a `Crdt.Replica`.
 
-  The browser is a thin client.
-  It diffs the textarea against the last text the replica confirmed
-  POSTs `{index, del, ins}`.
-  The replica turns that into Treedoc ops, persists, and broadcasts,
-  as `Crdt.insert/2` and `Crdt.delete/2` do from IEx.
-
-  The page polls `/state` to show edits that arrive from other nodes.
+  The browser is a *thin client*: it holds no CRDT state.  `/state` gives it
+  the visible chars as `{id, ch}` (the id is the PosID), and it sends edits as
+  `{del: [ids], after: id, ins: text}`, addressed by PosID, not by index.  So
+  an edit lands next to the chars the user was looking at even if remote ops
+  arrived since.  `Crdt.edit/1` applies the delete and the insert as one
+  atomic edit: persisted, then broadcast, exactly as `Crdt.insert/2` and
+  `Crdt.delete/2` do from IEx.  The page polls `/state` to show edits that
+  arrive from other nodes.
 
       iex --name laptop@192.168.1.10 --cookie cpd2026 -S mix
       iex> Crdt.Web.start()
       # open http://localhost:4000
 
-  Routes: `GET /` page, `GET /state` snapshot, `POST /edit` apply an edit.
+  Routes: `GET /` page, `GET /state` snapshot, `POST /edit` apply an edit
+  (200 and the new snapshot, or 422 and the snapshot plus `error`).
   """
 
   use Plug.Router
@@ -76,7 +78,8 @@ defmodule Crdt.Web do
     end
   end
 
-  # Routes
+  # ---------------------------------------------------------------- routes
+
   get "/" do
     conn
     |> put_resp_content_type("text/html")
@@ -88,19 +91,16 @@ defmodule Crdt.Web do
   end
 
   post "/edit" do
-    case conn.body_params do
-      %{"index" => i, "del" => d, "ins" => s}
-      when is_integer(i) and is_integer(d) and is_binary(s) ->
-        with :ok <- Crdt.delete(i, d),
-             :ok <- insert(i, s) do
-          send_json(conn, 200, snapshot())
-        else
-          {:error, reason} ->
-            send_json(conn, 422, Map.put(snapshot(), :error, inspect(reason)))
-        end
-
-      _ ->
-        send_json(conn, 400, %{error: "expected {index, del, ins}"})
+    with %{"del" => ids, "after" => anchor, "ins" => text} when is_list(ids) and is_binary(text) <-
+           conn.body_params,
+         {:ok, del} <- decode_posids(ids),
+         {:ok, anchor} <- decode_posid(anchor),
+         :ok <- Crdt.edit(%{del: del, anchor: anchor, ins: text}) do
+      send_json(conn, 200, snapshot())
+    else
+      {:error, reason} -> send_json(conn, 422, Map.put(snapshot(), :error, inspect(reason)))
+      :error -> send_json(conn, 422, Map.put(snapshot(), :error, "invalid id"))
+      _ -> send_json(conn, 400, %{error: "expected {del, after, ins}"})
     end
   end
 
@@ -108,16 +108,60 @@ defmodule Crdt.Web do
     send_resp(conn, 404, "not found")
   end
 
-  # helpers
+  # --------------------------------------------------------------- helpers
 
-  defp insert(_i, ""), do: :ok
-  defp insert(i, text), do: Crdt.insert(i, text)
+  # PosID <-> JSON: [[bit, seq, "node"], ...].  Ids come from the browser, so
+  # node names are only turned into *existing* atoms (never creates one).
+  defp encode_posid(posid) do
+    Enum.map(posid, fn {bit, seq, node} -> [bit, seq, Atom.to_string(node)] end)
+  end
 
+  defp decode_posids(ids) do
+    Enum.reduce_while(ids, {:ok, []}, fn id, {:ok, acc} ->
+      case decode_posid(id) do
+        {:ok, posid} -> {:cont, {:ok, [posid | acc]}}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      :error -> :error
+    end
+  end
+
+  defp decode_posid(steps) when is_list(steps) do
+    Enum.reduce_while(steps, {:ok, []}, fn
+      [bit, seq, node], {:ok, acc}
+      when bit in [0, 1] and is_integer(seq) and seq >= 1 and is_binary(node) ->
+        case existing_atom(node) do
+          {:ok, atom} -> {:cont, {:ok, [{bit, seq, atom} | acc]}}
+          :error -> {:halt, :error}
+        end
+
+      _, _ ->
+        {:halt, :error}
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      :error -> :error
+    end
+  end
+
+  defp decode_posid(_), do: :error
+
+  defp existing_atom(name) do
+    {:ok, String.to_existing_atom(name)}
+  rescue
+    ArgumentError -> :error
+  end
+
+  # One `debug` call gives text and ids from the same moment: the visible
+  # chars in order, each with its PosID.
   defp snapshot do
     with %{} = st <- Crdt.status(),
-         text when is_binary(text) <- Crdt.text() do
+         rows when is_list(rows) <- Crdt.debug() do
       %{
-        text: text,
+        chars: for({ch, posid, false} <- rows, do: %{id: encode_posid(posid), ch: ch}),
         node: node(),
         author: st.author,
         peers: st.peers,
