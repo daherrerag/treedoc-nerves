@@ -1,17 +1,36 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CPD 2026 / Masters of treedoc-op</title>
+<title>Treedoc editor</title>
 <style>
   :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
   body { margin: 0; display: flex; flex-direction: column; height: 100vh; }
-  header { padding: .5rem 1rem; font-size: .85rem; display: flex; gap: 1.25rem; flex-wrap: wrap;
-           border-bottom: 1px solid #8884; }
+  [hidden] { display: none !important; }
+  header, nav { padding: .5rem 1rem; font-size: .85rem; display: flex; gap: 1.25rem; flex-wrap: wrap;
+                border-bottom: 1px solid #8884; align-items: center; }
   header b { font-weight: 600; }
-  #dot { width: .6rem; height: .6rem; border-radius: 50%; background: #c33; align-self: center; }
+  #dot { width: .6rem; height: .6rem; border-radius: 50%; background: #c33; }
   #dot.on { background: #2a2; }
-  textarea { flex: 1; border: 0; padding: 1rem; font: 16px/1.5 ui-monospace, monospace; resize: none;
-             outline: none; background: transparent; color: inherit; }
+  nav { gap: .5rem; }
+  nav button { font: inherit; padding: .25rem .75rem; border: 1px solid #8886; border-radius: 4px;
+               background: transparent; color: inherit; cursor: pointer; }
+  nav button.on { background: #8883; font-weight: 600; }
+  nav select { font: inherit; margin-left: auto; max-width: 20rem; }
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  section { flex: 1; min-height: 0; overflow: auto; padding: 0 1rem 1rem; }
+  #p-doc { padding: 0; display: flex; flex-direction: column; }
+  textarea, #peer-doc { flex: 1; border: 0; padding: 1rem; font: 16px/1.5 ui-monospace, monospace;
+                        resize: none; outline: none; background: transparent; color: inherit; margin: 0;
+                        white-space: pre-wrap; overflow: auto; }
+  h3 { margin: 1rem 0 .25rem; font-size: .9rem; }
+  table { border-collapse: collapse; font: .8rem ui-monospace, monospace; }
+  th, td { text-align: left; padding: .15rem .75rem .15rem 0; vertical-align: top; }
+  th { opacity: .6; font-weight: 500; }
+  tr.dead td { opacity: .45; text-decoration: line-through; }
+  tr.me td:first-child { font-weight: 600; }
+  .bad { color: #c33; }
+  .ok { color: #2a2; }
+  .muted { opacity: .6; font-size: .8rem; }
 </style>
 <header>
   <span id="dot" title="connection"></span>
@@ -21,17 +40,31 @@
   <span>waiting <b id="waiting">-</b></span>
   <span id="err"></span>
 </header>
-<textarea id="ta" spellcheck="false" autofocus></textarea>
+<nav>
+  <button data-tab="doc" class="on">Document</button>
+  <button data-tab="state">State</button>
+  <button data-tab="nodes">Nodes</button>
+  <button data-tab="raw">Raw</button>
+  <select id="sel" title="which node to look at (peers are read-only)"></select>
+</nav>
+<main>
+  <section id="p-doc">
+    <textarea id="ta" spellcheck="false" autofocus></textarea>
+    <pre id="peer-doc" hidden></pre>
+  </section>
+  <section id="p-state" hidden></section>
+  <section id="p-nodes" hidden></section>
+  <section id="p-raw" hidden></section>
+</main>
 <script>
 const ta = document.getElementById('ta');
 const $ = id => document.getElementById(id);
 
-// helpers
+// --- pure helpers ------------------------------------------------------
 const join = atoms => atoms.map(a => a.ch).join('');
 
-// Smallest changed region between strings a and b
-// by UTF-16 unit, never splitting a surrogate pair:
-// a[p, aEnd) was replaced by b[p, bEnd).
+// Smallest changed region between strings a and b, by UTF-16 unit, never
+// splitting a surrogate pair: a[p, aEnd) was replaced by b[p, bEnd).
 function diffStr(a, b) {
   const m = Math.min(a.length, b.length);
   let p = 0;
@@ -55,9 +88,9 @@ function editFor(atoms, str) {
   const off = [0];
   for (const a of atoms) off.push(off[off.length - 1] + a.ch.length);
   let pi = 0;
-  while (pi + 1 < off.length && off[pi + 1] <= d.p) pi++; // last atom boundary <= start
+  while (pi + 1 < off.length && off[pi + 1] <= d.p) pi++;   // last atom boundary <= start
   let qi = pi;
-  while (off[qi] < d.aEnd) qi++; // first atom boundary >= end
+  while (off[qi] < d.aEnd) qi++;                            // first atom boundary >= end
   return {
     del: atoms.slice(pi, qi).map(a => a.id),
     after: pi === 0 ? [] : atoms[pi - 1].id,
@@ -65,10 +98,9 @@ function editFor(atoms, str) {
   };
 }
 
-// The user typed sent -> cur while the replica went sent -> server.
-// Replay the typing on top of server.
-// If both touched the same region the remote version wins
-// (the typed chars of that overlap are dropped).
+// The user typed sent -> cur while the replica went sent -> server.  Replay
+// the typing on top of server.  If both touched the same region the remote
+// version wins (the typed chars of that overlap are dropped).
 function rebase(sent, cur, server) {
   const L = diffStr(sent, cur), R = diffStr(sent, server);
   const typed = cur.slice(L.p, L.bEnd);
@@ -88,12 +120,12 @@ function shiftCaret(oldText, newText, pos) {
   return d.p;
 }
 
-// sync loop
-let atoms = [];// [{id, ch}] as last confirmed by the replica
-let base = ''; // join(atoms)
-let busy = false; // one request in flight at a time
+// --- sync loop ---------------------------------------------------------
+let atoms = [];       // [{id, ch}] as last confirmed by the replica
+let base = '';        // join(atoms)
+let busy = false;     // one request in flight at a time
 let composing = false;
-let fails = 0; // consecutive failed rounds, for the backoff
+let fails = 0;        // consecutive failed rounds, for the backoff
 let timer = null;
 
 const schedule = ms => { clearTimeout(timer); timer = setTimeout(sync, ms); };
@@ -124,13 +156,13 @@ function showStatus(st) {
 function adopt(st, sent, editing) {
   const server = join(st.chars);
   const cur = ta.value;
-  if (cur === sent) {// nothing typed meanwhile: replica text wins
+  if (cur === sent) {               // nothing typed meanwhile: replica text wins
     atoms = st.chars; base = server;
     if (cur !== server) setText(server);
-  } else if (editing) {// typed during a POST: keep typing on top of the reply
+  } else if (editing) {             // typed during a POST: keep typing on top of the reply
     atoms = st.chars; base = server;
     if (server !== sent) setText(rebase(sent, cur, server));
-  } // typed during a GET: stale reply, drop it
+  }                                 // typed during a GET: stale reply, drop it
 }
 
 async function sync() {
@@ -168,5 +200,174 @@ ta.addEventListener('input', () => { if (!composing && fails === 0) schedule(0);
 ta.addEventListener('compositionstart', () => { composing = true; });
 ta.addEventListener('compositionend', () => { composing = false; schedule(0); });
 window.addEventListener('online', () => { fails = 0; schedule(0); });
+// --- views (State, Nodes, Raw; read-only) ------------------------------
+// Pure helpers: how a char, a PosID and a clock are shown.
+const shortNode = n => String(n).split('@')[0];
+const showCh = ch => ({ '\n': '⏎', '\r': '␍', '\t': '⇥', ' ': '␠' }[ch] ?? ch);
+const pathStr = id => {
+  const steps = id.map(([b, s, n]) => `${b}·${s}·${shortNode(n)}`);
+  return steps.length > 5 ? `…${steps.length - 4} ` + steps.slice(-4).join(' ') : steps.join(' ');
+};
+const clockStr = c => Object.keys(c).sort().map(k => `${shortNode(k)}:${c[k]}`).join(' ') || 'empty';
+const syncText = r => {
+  if (!r.reachable) return ['unreachable', 'bad'];
+  if (!r.known) return ['other implementation (no status)', 'muted'];
+  const lag = [];
+  if (r.peer_lacks) lag.push(`lacks ${r.peer_lacks} of ours`);
+  if (r.we_lack) lag.push(`we lack ${r.we_lack}`);
+  return [lag.length ? lag.join(', ') : 'in sync', lag.length ? 'bad' : 'ok'];
+};
+
+function el(tag, text, cls) {
+  const e = document.createElement(tag);
+  if (text !== undefined) e.textContent = String(text);
+  if (cls) e.className = cls;
+  return e;
+}
+// Cells are shown with textContent only: chars and names come from other nodes.
+function table(head, rows) {
+  const t = el('table');
+  if (head) {
+    const h = el('tr');
+    head.forEach(x => h.append(el('th', x)));
+    t.append(h);
+  }
+  for (const r of rows) {
+    const tr = el('tr', undefined, r.cls);
+    for (const c of r.cells) {
+      const td = el('td', c !== null && typeof c === 'object' ? c.t : c, c !== null && typeof c === 'object' ? c.cls : undefined);
+      if (c !== null && typeof c === 'object' && c.title) td.title = c.title;
+      tr.append(td);
+    }
+    t.append(tr);
+  }
+  return t;
+}
+const kv = pairs => table(null, pairs.map(([k, v]) => ({ cells: [k, v] })));
+
+function renderState(r) {
+  const out = $('p-state');
+  if (r.error) return out.replaceChildren(el('p', r.error, 'bad'));
+  const s = r.status;
+  out.replaceChildren(
+    el('h3', `Local CRDT state of ${r.node}`),
+    kv([
+      ['author', s.author ?? '-'], ['connected to', s.peers.length ? s.peers.join(', ') : 'none'],
+      ['ops applied', s.history], ['chars', s.chars], ['tombstones', s.dead],
+      ['received from network', s.received], ['duplicates dropped', s.duplicates],
+      ['ignored messages', s.ignored], ['blocked', s.blocked], ['log file', s.file]
+    ]),
+    el('h3', 'Vector clock (ops applied per author)'),
+    table(['author', 'seq'], Object.keys(s.clock).sort().map(k => ({ cells: [k, s.clock[k]] }))),
+    el('h3', `Waiting for dependencies (${s.waiting.length})`),
+    s.waiting.length
+      ? table(['op', 'missing'], s.waiting.map(w =>
+          ({ cells: [`${shortNode(w.from)} #${w.seq}`, clockStr(w.missing)] })))
+      : el('p', 'none', 'muted'));
+}
+
+function opsTable(o) {
+  return table(['author', 'seq', 'op', 'char', 'position'], o.ops.map(op => ({
+    cells: [shortNode(op.from), op.seq, op.op, op.ch === null ? '' : showCh(op.ch), { t: pathStr(op.id), title: pathStr(op.id) }]
+  })));
+}
+
+function renderNodes(p, ops) {
+  const out = $('p-nodes');
+  if (p.error) return out.replaceChildren(el('p', p.error, 'bad'));
+  const rows = p.rows.map(r => {
+    const [text, cls] = r.self ? ['this node', 'muted'] : syncText(r);
+    const same = r.self || !r.known ? '' : { t: r.same_text ? 'same ✓' : 'differs ✗', cls: r.same_text ? 'ok' : 'bad' };
+    return {
+      cls: r.self ? 'me' : '',
+      cells: [r.node, r.known ? r.history : '', r.known ? clockStr(r.clock) : '', r.known ? r.waiting : '',
+              r.known ? `${r.received} / ${r.duplicates} / ${r.ignored}` : '', { t: text, cls }, same]
+    };
+  });
+  const d = p.discovery;
+  out.replaceChildren(
+    el('h3', 'Nodes this node is connected to'),
+    table(['node', 'ops', 'clock', 'waiting', 'recv / dup / ignored', 'sync', 'text'], rows),
+    el('p', d ? `discovery: ${d.mode}; heard ${d.heard.length ? d.heard.join(', ') : 'nobody'}`
+              : 'discovery: not running (connect with Node.connect/1)', 'muted'),
+    el('h3', `Last ${ops.ops.length} ops applied here, oldest first (who they came from)`),
+    ops.ops.length ? opsTable(ops) : el('p', 'none yet', 'muted'));
+}
+
+function renderRaw(raw, ops) {
+  const out = $('p-raw');
+  if (raw.error) return out.replaceChildren(el('p', raw.error, 'bad'));
+  const dead = raw.rows.filter(r => r.dead).length;
+  const depth = raw.rows.reduce((m, r) => Math.max(m, r.id.length), 0);
+  let vis = 0;
+  const rows = raw.rows.map((r, i) => {
+    const last = r.id[r.id.length - 1];
+    return {
+      cls: r.dead ? 'dead' : '',
+      cells: [i, r.dead ? '' : vis++, showCh(r.ch), { t: pathStr(r.id), title: pathStr(r.id) },
+              r.id.length, shortNode(last[2]), last[1]]
+    };
+  });
+  out.replaceChildren(
+    el('h3', `Raw document of ${raw.node}: ${raw.total} entries, ${dead} tombstones, deepest path ${depth}` +
+             (raw.total > raw.rows.length ? ` (first ${raw.rows.length} shown)` : '')),
+    table(['#', 'visible', 'char', 'PosID (bit·seq·node)', 'depth', 'author', 'seq'], rows),
+    el('h3', `Last ${ops.ops.length} of ${ops.total} ops`),
+    ops.ops.length ? opsTable(ops) : el('p', 'none yet', 'muted'));
+}
+
+let tab = 'doc', sel = '', refreshing = false, again = false, tick = 0;
+const q = () => (sel ? `?node=${encodeURIComponent(sel)}` : '');
+const api = async path => (await fetch(path)).json();
+
+function setSelect(p) {
+  const names = p.rows.filter(r => !r.self).map(r => r.node);
+  if (sel && !names.includes(sel)) { sel = ''; showTab(tab); }
+  const opts = [['', `this node (${p.self})`]].concat(
+    p.rows.filter(r => !r.self).map(r => [r.node, r.node + (r.reachable ? '' : ' (unreachable)')]));
+  $('sel').replaceChildren(...opts.map(([v, label]) => {
+    const o = el('option', label); o.value = v; return o;
+  }));
+  $('sel').value = sel;
+}
+
+async function refresh() {
+  if (refreshing) { again = true; return; }   // a click during a refresh: run once more right after
+  refreshing = true;
+  try {
+    let peers = null;
+    if (tick++ % 5 === 0 || tab === 'nodes') { peers = await api('/api/peers'); if (peers.rows) setSelect(peers); }
+    if (tab === 'doc' && sel) {
+      const r = await api('/api/doc' + q());
+      $('peer-doc').textContent = r.text ?? r.error ?? '';
+    } else if (tab === 'state') {
+      renderState(await api('/api/status' + q()));
+    } else if (tab === 'nodes') {
+      renderNodes(peers, await api('/api/ops'));
+    } else if (tab === 'raw') {
+      const [raw, ops] = await Promise.all([api('/api/raw' + q()), api('/api/ops' + q())]);
+      renderRaw(raw, ops);
+    }
+  } catch (e) { /* offline: the header dot shows it */ }
+  finally {
+    refreshing = false;
+    if (again) { again = false; refresh(); }
+  }
+}
+
+function showTab(t) {
+  tab = t;
+  for (const name of ['doc', 'state', 'nodes', 'raw']) $('p-' + name).hidden = name !== t;
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  ta.hidden = sel !== '';          // a peer's text is read-only
+  $('peer-doc').hidden = sel === '';
+}
+
+document.querySelectorAll('nav button').forEach(b =>
+  b.addEventListener('click', () => { showTab(b.dataset.tab); refresh(); }));
+$('sel').addEventListener('change', () => { sel = $('sel').value; showTab(tab); refresh(); });
+setInterval(refresh, 1000);
+refresh();
+
 sync();
 </script>
