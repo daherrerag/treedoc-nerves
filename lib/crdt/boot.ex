@@ -6,7 +6,7 @@ defmodule Crdt.Boot do
   2. Sets the distribution port range to `4218..4228`.
   3. Starts the node in longnames mode as `doc@<ip>`.
   4. Sets the magic cookie to `:cpd2026`.
-  5. Starts `Crdt.Replica` and `Crdt.Discovery` under `Crdt.DynSup`.
+  5. Starts `Crdt.Replica` under `Crdt.DynSup`.  `Crdt.Discovery` stays off until `Crdt.discovery_on/0`.
   """
 
   use GenServer
@@ -54,7 +54,6 @@ defmodule Crdt.Boot do
         File.mkdir_p!(@data_dir)
 
         start_child({Crdt.Replica, [data_dir: @data_dir]})
-        start_child({Crdt.Discovery, []})
 
         Logger.info("crdt node #{node} started")
         %{state | started?: true}
