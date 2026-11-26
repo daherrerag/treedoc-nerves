@@ -207,6 +207,29 @@ defmodule Crdt.Replica do
   end
 
   @impl true
+  def handle_call(:leave, _from, state) do
+    case File.write(left_path(state.path), "", [:sync]) do
+      :ok -> {:reply, :ok, %{state | left: true}}
+      {:error, reason} -> {:reply, {:error, {:disk, reason}}, state}
+    end
+  end
+
+  # Resume: resend our history and ask peers for theirs (`:hello`).
+  @impl true
+  def handle_call(:join, _from, state) do
+    case File.rm(left_path(state.path)) do
+      ok when ok in [:ok, {:error, :enoent}] ->
+        state = %{state | left: false}
+        send_history(state)
+        broadcast(state, {:hello, state.me})
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, {:disk, reason}}, state}
+    end
+  end
+
+  @impl true
   def handle_call(_other, _from, state) do
     {:reply, {:error, :unknown}, state}
   end
@@ -451,6 +474,7 @@ defmodule Crdt.Replica do
       duplicates: state.duplicates,
       ignored: state.ignored,
       blocked: state.blocked,
+      left: state.left,
       file: state.path
     }
   end
