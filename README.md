@@ -28,6 +28,8 @@ Crdt.text()                 # visible text
 Crdt.status()               # summary map (clock, peers, counters)
 Crdt.history()              # list of applied ops
 Crdt.debug()                # each char with PosID and deleted? flag
+Crdt.leave()                # stop syncing, keep the local document
+Crdt.join()                 # resume syncing and catch up
 Crdt.discovery_on()
 Crdt.discovery_off()
 ```
@@ -235,6 +237,10 @@ The history log lives at `/data/crdt/doc.log` on the Pi (one op per line,
 `term_to_binary` + CRC32 + Base64).  One `fsync` per batch before any op is
 applied or sent, so sequence numbers survive a crash.  On restart, the
 document and vector clock are rebuilt from the log.
+
+`Crdt.leave/0` writes a marker file `<log>.left` next to the log.  While it
+exists the node neither sends nor accepts ops (local edits still work and are
+sent on `Crdt.join/0`), also after a restart.
 
 ## Tests
 
