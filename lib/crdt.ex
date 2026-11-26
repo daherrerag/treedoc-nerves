@@ -38,6 +38,13 @@ defmodule Crdt do
   @doc "Each char with its PosID and deleted? flag, as `{ch, pos, dead?}`."
   def debug, do: call(:debug)
 
+  @doc "Starts peer discovery (multicast + sweep). Off by default."
+  defdelegate discovery_on(), to: Crdt.Discovery, as: :on
+
+  @doc "Stops peer discovery."
+  defdelegate discovery_off(), to: Crdt.Discovery, as: :off
+
+  # 60 s timeout.
   # 60 s timeout.  On no-replica or exit, returns a tuple instead of crashing.
   defp call(request) do
     GenServer.call(Replica, request, 60_000)
