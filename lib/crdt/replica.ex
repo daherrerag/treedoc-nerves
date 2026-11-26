@@ -71,6 +71,7 @@ defmodule Crdt.Replica do
       history: Enum.reverse(ops),
       n_history: length(ops),
       blocked: blocked,
+      left: File.exists?(left_path(path)),
       received: 0,
       duplicates: 0,
       ignored: 0
@@ -78,7 +79,7 @@ defmodule Crdt.Replica do
 
     if Node.list() != [] do
       send_history(state)
-      broadcast({:hello, me})
+      broadcast(state, {:hello, me})
     end
 
     {:ok, state}
@@ -211,6 +212,10 @@ defmodule Crdt.Replica do
   end
 
   # ---------------------------------------------------------- remote ops
+
+  @impl true
+  def handle_cast({:remote, _raw}, %{left: true} = state),
+    do: {:noreply, %{state | ignored: state.ignored + 1}}
 
   @impl true
   def handle_cast({:remote, raw}, state) do
@@ -361,7 +366,7 @@ defmodule Crdt.Replica do
             %{s | doc: Treedoc.apply_op(s.doc, op), vc: Causal.deliver(s.vc, op)}
           end)
 
-        Enum.each(ops, &broadcast({:remote, &1}))
+        Enum.each(ops, &broadcast(state, {:remote, &1}))
         {:reply, :ok, note(state, ops)}
 
       {:error, reason} ->
@@ -403,7 +408,7 @@ defmodule Crdt.Replica do
 
     doc = Enum.reduce(ops, state.doc, &Treedoc.apply_op(&2, &1))
 
-    Enum.each(ops, &broadcast({:remote, &1}))
+    Enum.each(ops, &broadcast(state, {:remote, &1}))
 
     %{state | doc: doc, received: state.received + length(ops)}
     |> note(ops)
@@ -416,12 +421,17 @@ defmodule Crdt.Replica do
   # ------------------------------------------------------------- helpers
 
   defp send_history(state) do
-    Enum.each(Enum.reverse(state.history), &broadcast({:remote, &1}))
+    Enum.each(Enum.reverse(state.history), &broadcast(state, {:remote, &1}))
   end
 
-  defp broadcast(message) do
+  # Left: nothing goes out.
+  defp broadcast(%{left: true}, _message), do: :ok
+
+  defp broadcast(_state, message) do
     for n <- Node.list(), do: GenServer.cast({Message.name(), n}, message)
   end
+
+  defp left_path(path), do: path <> ".left"
 
   defp remember_name(state) do
     if Node.alive?(), do: %{state | me: node()}, else: state
