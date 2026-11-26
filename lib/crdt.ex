@@ -44,8 +44,14 @@ defmodule Crdt do
   @doc "Stops peer discovery."
   defdelegate discovery_off(), to: Crdt.Discovery, as: :off
 
+  @doc "Stops syncing with peers; the local document and log are kept. Survives restarts."
+  def leave, do: call(:leave)
+
+  @doc "Resumes syncing: sends our history and asks peers for theirs."
+  def join, do: call(:join)
+
   # 60 s timeout.
-  # 60 s timeout.  On no-replica or exit, returns a tuple instead of crashing.
+  # On no-replica or exit, returns a tuple instead of crashing.
   defp call(request) do
     GenServer.call(Replica, request, 60_000)
   catch
