@@ -184,6 +184,12 @@ PosIDs come from `Crdt.debug/0`.
 
 ## How peers find each other
 
+Discovery is **off by default**.  Start it from IEx with `Crdt.discovery_on()`
+and stop it with `Crdt.discovery_off()`.
+
+Otherwise connect nodes by hand with
+`Node.connect/1`.
+
 1. **Multicast** — every node announces itself every 2 s on UDP group
    `233.252.1.32:45892` with the tag `"crdt-treedoc-1 "`.
 2. **/24 sweep** — every 10 s, each node asks every IP in its /24 which
