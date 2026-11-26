@@ -11,7 +11,7 @@ Crdt.Application
   └── Crdt.DynSup (DynamicSupervisor)
         ├── Crdt.Boot        — waits for wlan0 IP, starts distribution
         ├── Crdt.Replica     — owns the document state (GenServer)
-        └── Crdt.Discovery   — multicast + /24 epmd sweep
+        └── Crdt.Discovery   — multicast + /24 epmd sweep (off by default, started on demand)
 
 Crdt.Treedoc    — pure CRDT data type
 Crdt.Causal     — vector-clock causal delivery
@@ -28,6 +28,8 @@ Crdt.text()                 # visible text
 Crdt.status()               # summary map (clock, peers, counters)
 Crdt.history()              # list of applied ops
 Crdt.debug()                # each char with PosID and deleted? flag
+Crdt.discovery_on()
+Crdt.discovery_off()
 ```
 
 ## Build for the Pi
