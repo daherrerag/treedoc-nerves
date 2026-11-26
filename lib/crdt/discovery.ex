@@ -21,7 +21,7 @@ defmodule Crdt.Discovery do
   * Unknown packets are dropped silently.
   """
 
-  use GenServer
+  use GenServer, restart: :temporary
 
   @group {233, 252, 1, 32}
   @port 45_892
@@ -37,6 +37,20 @@ defmodule Crdt.Discovery do
 
   @doc "Options: `:me`, `:ip`, `:port`."
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+
+  @doc "Starts discovery (off by default). Under `Crdt.DynSup` if it runs, else linked to the caller."
+  def on do
+    case Process.whereis(Crdt.DynSup) do
+      nil -> start_link([])
+      sup -> DynamicSupervisor.start_child(sup, {__MODULE__, []})
+    end
+  end
+
+  @doc "Stops discovery and closes its socket. `:ok` even if it is not running."
+  def off do
+    if pid = Process.whereis(__MODULE__), do: GenServer.stop(pid)
+    :ok
+  end
 
   @doc "`{mode, names}` where mode is the listening state and names are heard peers."
   def info, do: GenServer.call(__MODULE__, :info)
