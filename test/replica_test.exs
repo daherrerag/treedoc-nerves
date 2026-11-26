@@ -44,6 +44,29 @@ defmodule Crdt.ReplicaTest do
     assert Crdt.status().duplicates == 1
   end
 
+  test "leave ignores remote ops, survives a restart, and join resumes" do
+    start_supervised!(Crdt.Replica)
+    GenServer.cast(Crdt.Replica, {:remote, op(1, "h")})
+    assert Crdt.text() == "h"
+
+    assert :ok = Crdt.leave()
+    assert Crdt.status().left
+
+    GenServer.cast(Crdt.Replica, {:remote, op(2, "i")})
+    assert Crdt.text() == "h"
+    assert Crdt.status().ignored == 1
+
+    stop_supervised!(Crdt.Replica)
+    start_supervised!(Crdt.Replica)
+    assert Crdt.status().left
+    assert Crdt.text() == "h"
+
+    assert :ok = Crdt.join()
+    refute Crdt.status().left
+    GenServer.cast(Crdt.Replica, {:remote, op(2, "i")})
+    assert Crdt.text() == "hi"
+  end
+
   test "restart rebuilds from the log" do
     start_supervised!(Crdt.Replica)
     GenServer.cast(Crdt.Replica, {:remote, op(1, "h")})
