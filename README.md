@@ -129,12 +129,14 @@ iex --name bob@192.168.1.10 --cookie cpd2026 -S mix
 
 ```elixir
 # In alice's shell:
+Crdt.Replica.start_link(log: "data/alice.log")
 Node.connect(:"bob@192.168.1.10")
 Crdt.insert(0, "hi bob")
 ```
 
 ```elixir
 # In bob's shell:
+Crdt.Replica.start_link(log: "data/bob.log")
 Crdt.text()    # "hi bob"
 ```
 
