@@ -250,6 +250,7 @@ defmodule Crdt.Web do
           received: Map.get(st, :received),
           duplicates: Map.get(st, :duplicates),
           ignored: Map.get(st, :ignored),
+          left: Map.get(st, :left),
           same_text: :erlang.phash2(text) == mine.hash,
           peer_lacks: lack(mine.clock, clock),
           we_lack: lack(clock, mine.clock)
@@ -335,7 +336,8 @@ defmodule Crdt.Web do
         clock: st.clock,
         history: st.history,
         waiting: length(st.waiting),
-        blocked: st.blocked
+        blocked: st.blocked,
+        left: st.left
       }
     else
       _ -> %{error: "replica not running"}

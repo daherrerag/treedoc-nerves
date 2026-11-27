@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Treedoc editor</title>
+<title>Masters of treedoc / CPD 2026</title>
 <style>
   :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
   body { margin: 0; display: flex; flex-direction: column; height: 100vh; }
@@ -149,7 +149,8 @@ function showStatus(st) {
   $('peers').textContent = st.peers ? (st.peers.length ? st.peers.join(', ') : 'none') : '-';
   $('history').textContent = st.history ?? '-';
   $('waiting').textContent = st.waiting ?? '-';
-  $('err').textContent = st.error ?? (st.blocked ? 'edits blocked (restart with a new node name)' : '');
+  $('err').textContent = st.error ?? (st.blocked ? 'edits blocked (restart with a new node name)'
+    : st.left ? 'left: not syncing with peers (Crdt.join() to resume)' : '');
 }
 
 // Take the replica's reply as the new confirmed state.
@@ -212,6 +213,7 @@ const clockStr = c => Object.keys(c).sort().map(k => `${shortNode(k)}:${c[k]}`).
 const syncText = r => {
   if (!r.reachable) return ['unreachable', 'bad'];
   if (!r.known) return ['other implementation (no status)', 'muted'];
+  if (r.left) return ['left (not syncing)', 'muted'];
   const lag = [];
   if (r.peer_lacks) lag.push(`lacks ${r.peer_lacks} of ours`);
   if (r.we_lack) lag.push(`we lack ${r.we_lack}`);
@@ -255,7 +257,7 @@ function renderState(r) {
       ['author', s.author ?? '-'], ['connected to', s.peers.length ? s.peers.join(', ') : 'none'],
       ['ops applied', s.history], ['chars', s.chars], ['tombstones', s.dead],
       ['received from network', s.received], ['duplicates dropped', s.duplicates],
-      ['ignored messages', s.ignored], ['blocked', s.blocked], ['log file', s.file]
+      ['ignored messages', s.ignored], ['blocked', s.blocked], ['left', s.left], ['log file', s.file]
     ]),
     el('h3', 'Vector clock (ops applied per author)'),
     table(['author', 'seq'], Object.keys(s.clock).sort().map(k => ({ cells: [k, s.clock[k]] }))),
