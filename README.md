@@ -132,12 +132,16 @@ iex --name bob@192.168.1.10 --cookie cpd2026 -S mix
 Crdt.Replica.start_link(log: "data/alice.log")
 Node.connect(:"bob@192.168.1.10")
 Crdt.insert(0, "hi bob")
+# or in the web editor
+Crdt.Web.start(port: 4000)
 ```
 
 ```elixir
 # In bob's shell:
 Crdt.Replica.start_link(log: "data/bob.log")
 Crdt.text()    # "hi bob"
+# or in the web editor
+Crdt.Web.start(port: 4001)
 ```
 
 ## Web editor (browser view of a node)

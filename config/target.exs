@@ -12,7 +12,7 @@ config :logger, :default_handler, false
 # Uses any of the standard public key types in ~/.ssh.
 keys =
   System.user_home!()
-  |> Path.join(".ssh/id_{rsa,ecdsa,ed25519}.pub")
+  |> Path.join(".ssh/nerves-daherrerag-ed25519.pub")
   |> Path.wildcard()
 
 if keys == [],
