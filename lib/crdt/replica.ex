@@ -214,6 +214,8 @@ defmodule Crdt.Replica do
     end
   end
 
+  @impl true
+  def handle_call(:join, _from, %{left: false} = state), do: {:reply, :ok, state}
   # Resume: resend our history and ask peers for theirs (`:hello`).
   @impl true
   def handle_call(:join, _from, state) do

@@ -49,6 +49,9 @@ defmodule Crdt.ReplicaTest do
     GenServer.cast(Crdt.Replica, {:remote, op(1, "h")})
     assert Crdt.text() == "h"
 
+    assert :ok = Crdt.join()
+    refute Crdt.status().left
+
     assert :ok = Crdt.leave()
     assert Crdt.status().left
 
