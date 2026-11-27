@@ -26,7 +26,8 @@ defmodule Crdt.HistoryTest do
     :ok = History.add(fd, [op(1, "h")])
     :file.close(fd)
     File.write!(file, "GARBAGE\n", [:append])
-    assert {:corrupt, [op(1, "h")], 2} = History.load(file)
+    expected = [op(1, "h")]
+    assert {:corrupt, ^expected, 2} = History.load(file)
   end
 
   test "shelve moves the bad file aside", %{tmp_dir: dir} do
