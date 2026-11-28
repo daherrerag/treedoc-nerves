@@ -166,6 +166,15 @@ defmodule Crdt.ReplicaTest do
       assert Crdt.edit(%{}) == :ok
       assert Crdt.history() == []
     end
+
+  test "have/1 and missing/2" do
+    ops = [op(1, "a"), op(2, "b")]
+    assert Crdt.Replica.have(ops) == %{x: 2}
+    assert Crdt.Replica.missing(ops, %{}) == ops
+    assert Crdt.Replica.missing(ops, %{x: 1}) == [op(2, "b")]
+    assert Crdt.Replica.missing(ops, %{x: 2}) == []
+    end
+
   end
 
   defp random_term do

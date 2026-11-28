@@ -445,6 +445,20 @@ defmodule Crdt.Replica do
 
   # ------------------------------------------------------------- helpers
 
+  @doc false
+  # Highest seq per author among the applied ops.
+  def have(history) do
+    Enum.reduce(history, %{}, fn %{from: f, vc: vc}, acc ->
+      Map.update(acc, f, vc[f], &max(&1, vc[f]))
+    end)
+  end
+
+  @doc false
+  # Ops (oldest first) that a peer with this `have` lacks.
+  def missing(ops, have) do
+    Enum.filter(ops, fn %{from: f, vc: vc} -> vc[f] > Map.get(have, f, 0) end)
+  end
+
   defp send_history(state) do
     Enum.each(Enum.reverse(state.history), &broadcast(state, {:remote, &1}))
   end
