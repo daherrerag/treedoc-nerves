@@ -77,12 +77,9 @@ defmodule Crdt.Replica do
       ignored: 0
     }
 
-    if Node.list() != [] do
-      send_history(state)
-      broadcast(state, {:hello, me})
-    end
-
+    if Node.list() != [], do: broadcast(state, {:hello, me, have(state.history)})
     {:ok, state}
+
   end
 
   # Rebuild the vector clock from the persisted history by max-merging every
@@ -222,8 +219,7 @@ defmodule Crdt.Replica do
     case File.rm(left_path(state.path)) do
       ok when ok in [:ok, {:error, :enoent}] ->
         state = %{state | left: false}
-        send_history(state)
-        broadcast(state, {:hello, state.me})
+        broadcast(state, {:hello, state.me, have(state.history)})
         {:reply, :ok, state}
 
       {:error, reason} ->
@@ -257,16 +253,29 @@ defmodule Crdt.Replica do
   end
 
   @impl true
+  def handle_cast({tag, node, have}, state) when tag in [:hello, :have] and is_atom(node) do
+    case Message.clock(have) do
+      {:ok, have} ->
+        send_missing(state, node, have)
+        if tag == :hello, do: send_have(state, node)
+        {:noreply, state}
+
+      :error ->
+        {:noreply, %{state | ignored: state.ignored + 1}}
+    end
+  end
+
+  @impl true
   def handle_cast(_other, state) do
     {:noreply, %{state | ignored: state.ignored + 1}}
   end
 
   # ------------------------------------------------------------- network
 
-  @impl true
-  def handle_info({:nodeup, _n}, state) do
-    send_history(state)
-    {:noreply, remember_name(state)}
+  def handle_info({:nodeup, n}, state) do
+    state = remember_name(state)
+    send_have(state, n)
+    {:noreply, state}
   end
 
   @impl true
@@ -461,6 +470,21 @@ defmodule Crdt.Replica do
 
   defp send_history(state) do
     Enum.each(Enum.reverse(state.history), &broadcast(state, {:remote, &1}))
+  end
+
+  defp send_have(%{left: true}, _node), do: :ok
+  defp send_have(state, node), do: to_peer(node, {:have, state.me, have(state.history)})
+
+  defp send_missing(%{left: true}, _node, _have), do: :ok
+
+  defp send_missing(state, node, have) do
+    state.history |> Enum.reverse() |> missing(have) |> Enum.each(&to_peer(node, {:remote, &1}))
+  end
+
+  # Only connected nodes: a forged name must not make us dial out.
+  defp to_peer(node, message) do
+    if node in Node.list(), do: GenServer.cast({Message.name(), node}, message)
+    :ok
   end
 
   # Left: nothing goes out.

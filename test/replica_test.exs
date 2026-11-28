@@ -180,8 +180,8 @@ defmodule Crdt.ReplicaTest do
   defp random_term do
     Enum.at(
       [:garbage, {:remote, %{}}, {:hello, "not_atom"}, %{},
-       {:remote, op(:rand.uniform(5), "x")}, {:nodeup, :fake@node}],
-      :rand.uniform(6) - 1
-    )
-  end
+       {:remote, op(:rand.uniform(5), "x")}, {:nodeup, :fake@node},
+       {:hello, :a@b, "bad"}, {:have, :a@b, %{x: -1}}],
+      :rand.uniform(8) - 1
+    )  end
 end
