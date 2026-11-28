@@ -237,6 +237,11 @@ the `{:hello, node}` catch-up, and `{seq, node}` never repeating.  The web
 editor's extra calls (`:status`, `:text`, `:debug`, `:history`, `:edit`) are
 local to this implementation and change nothing on the wire.
 
+On `:nodeup`, boot and `Crdt.join/0` nodes exchange `have` maps (highest seq per
+author) and send each other only the missing ops.  Old nodes that send
+`{:hello, node}` still get the full history, but they ignore the new messages,
+so run the same version on every node.
+
 ## Persistence
 
 The history log lives at `/data/crdt/doc.log` on the Pi (one op per line,
@@ -267,7 +272,6 @@ ICDCS 2009. <https://doi.org/10.1109/ICDCS.2009.20>
 ## Limitations
 
 - Tombstones and history grow forever (no GC).
-- The whole history is resent on each `:nodeup`.
 - Typing char-by-char at the end makes the path one step longer per char
   (pastes are balanced).
 - A node name must never be reused once its log is gone.  A reflashed Pi, a
