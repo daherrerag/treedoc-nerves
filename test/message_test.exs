@@ -26,6 +26,13 @@ defmodule Crdt.MessageTest do
     for m <- bad, do: assert(Message.validate(m) == :error, inspect(m))
   end
 
+  test "clock accepts atom => non_neg_integer maps only" do
+    assert {:ok, %{a: 0, b: 3}} = Crdt.Message.clock(%{a: 0, b: 3})
+    assert :error = Crdt.Message.clock(%{a: -1})
+    assert :error = Crdt.Message.clock(%{"a" => 1})
+    assert :error = Crdt.Message.clock("bad")
+  end
+
   test "registered name is Crdt.Replica" do
     assert Message.name() == Crdt.Replica
   end

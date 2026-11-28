@@ -48,6 +48,9 @@ defmodule Crdt.Message do
 
   def validate(_), do: :error
 
+  @doc "Validate the `have` map of `:hello` / `:have`: `%{atom => non_neg_integer}`."
+  def clock(clock), do: if(vc?(clock), do: {:ok, clock}, else: :error)
+
   # A grapheme is a valid UTF-8 binary whose first grapheme is itself.
   defp grapheme?(ch) when is_binary(ch) do
     String.first(ch) == ch and String.valid?(ch)
